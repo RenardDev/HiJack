@@ -715,7 +715,12 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 			return EXIT_FAILURE;
 		}
 
-		if (RegSetValueEx(hKey, _T("Debugger"), 0, REG_SZ, reinterpret_cast<const BYTE*>(argv[0]), (static_cast<DWORD>(_tcslen(argv[0])) + 1) * sizeof(TCHAR)) != ERROR_SUCCESS) {
+		auto ProcessPath = GetProcessPath(GetCurrentProcess());
+		if (ProcessPath.empty()) {
+			return EXIT_FAILURE;
+		}
+
+		if (RegSetValueEx(hKey, _T("Debugger"), 0, REG_SZ, reinterpret_cast<const BYTE*>(ProcessPath.c_str()), (static_cast<DWORD>(ProcessPath.length()) + 1) * sizeof(TCHAR)) != ERROR_SUCCESS) {
 			_tprintf_s(_T("ERROR: RegSetValueEx (Error = 0x%08X)\n"), GetLastError());
 			RegCloseKey(hKey);
 			return EXIT_FAILURE;
