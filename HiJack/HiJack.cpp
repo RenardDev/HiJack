@@ -684,7 +684,7 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 }
 
 int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
-	_tprintf_s(_T("HiJack [Version 1.0.0]\n\n"));
+	_tprintf_s(_T("HiJack [Version 1.0.3]\n\n"));
 
 	if (argc < 2) {
 		_tprintf_s(_T("Usage variations:\n"));
@@ -715,12 +715,12 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 			return EXIT_FAILURE;
 		}
 
-		auto ProcessPath = GetProcessPath(GetCurrentProcess());
-		if (ProcessPath.empty()) {
+		PTCHAR szSelfProcessPath = NtCurrentTeb()->ProcessEnvironmentBlock->ProcessParameters->ImagePathName.Buffer;
+		if (!szSelfProcessPath) {
 			return EXIT_FAILURE;
 		}
 
-		if (RegSetValueEx(hKey, _T("Debugger"), 0, REG_SZ, reinterpret_cast<const BYTE*>(ProcessPath.c_str()), (static_cast<DWORD>(ProcessPath.length()) + 1) * sizeof(TCHAR)) != ERROR_SUCCESS) {
+		if (RegSetValueEx(hKey, _T("Debugger"), 0, REG_SZ, reinterpret_cast<const BYTE*>(szSelfProcessPath), (static_cast<DWORD>(_tcslen(szSelfProcessPath)) + 1) * sizeof(TCHAR)) != ERROR_SUCCESS) {
 			_tprintf_s(_T("ERROR: RegSetValueEx (Error = 0x%08X)\n"), GetLastError());
 			RegCloseKey(hKey);
 			return EXIT_FAILURE;
@@ -747,15 +747,22 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 		}
 
 		HKEY hKey = nullptr;
-		if (RegCreateKeyEx(HKEY_LOCAL_MACHINE, szKey, NULL, nullptr, NULL, KEY_READ | KEY_WRITE, NULL, &hKey, NULL) != ERROR_SUCCESS) {
+		if (RegCreateKeyEx(HKEY_LOCAL_MACHINE, szKey, NULL, nullptr, NULL, KEY_WRITE, NULL, &hKey, NULL) != ERROR_SUCCESS) {
 			_tprintf_s(_T("ERROR: RegCreateKeyEx (Error = 0x%08X)\n"), GetLastError());
 			return EXIT_FAILURE;
 		}
 
 		RegDeleteValue(hKey, _T("Debugger"));
+		RegCloseKey(hKey);
 
-		DWORD unKeysCount = 0;
-		if (RegQueryInfoKey(hKey, nullptr, nullptr, nullptr, &unKeysCount, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) {
+		hKey = nullptr;
+		if (RegCreateKeyEx(HKEY_LOCAL_MACHINE, szKey, NULL, nullptr, NULL, KEY_READ, NULL, &hKey, NULL) != ERROR_SUCCESS) {
+			_tprintf_s(_T("ERROR: RegCreateKeyEx (Error = 0x%08X)\n"), GetLastError());
+			return EXIT_FAILURE;
+		}
+
+		DWORD unValuesCount = 0;
+		if (RegQueryInfoKey(hKey, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &unValuesCount, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) {
 			_tprintf_s(_T("ERROR: RegQueryInfoKey (Error = 0x%08X)\n"), GetLastError());
 			RegCloseKey(hKey);
 			return EXIT_SUCCESS;
@@ -763,7 +770,7 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 
 		RegCloseKey(hKey);
 
-		if (!unKeysCount) {
+		if (!unValuesCount) {
 			if (RegDeleteKey(HKEY_LOCAL_MACHINE, szKey) != ERROR_SUCCESS) {
 				_tprintf_s(_T("WARNING: RegDeleteKey (Error = 0x%08X)\n"), GetLastError());
 			}
