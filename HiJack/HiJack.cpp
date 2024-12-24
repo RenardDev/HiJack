@@ -31,7 +31,7 @@ using tstring = std::basic_string<TCHAR, std::char_traits<TCHAR>, std::allocator
 
 // General definitions
 
-#define HIJACK_VERSION "1.1.0"
+#define HIJACK_VERSION "1.1.1"
 
 #define ProcessDebugFlags static_cast<PROCESSINFOCLASS>(0x1F)
 #define SafeCloseHandle(x) if ((x) && (x != INVALID_HANDLE_VALUE)) { CloseHandle(x); }
@@ -1003,16 +1003,9 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 }
 
 void ShowHelp() {
-#ifndef _DEBUG
-#ifdef _WIN64
-	_tprintf_s(_T("HiJack [Version " HIJACK_VERSION "]\n\n"));
-#else
-	_tprintf_s(_T("HiJack32 [Version " HIJACK_VERSION "]\n\n"));
-#endif
-#endif // !_DEBUG
-
 	_tprintf_s(_T("Usage variations:\n"));
 	_tprintf_s(_T("  <Path> <Arguments>\n"));
+	_tprintf_s(_T("  /list\n"));
 	_tprintf_s(_T("  /add <File Name>\n"));
 	_tprintf_s(_T("  /remove <File Name>\n"));
 }
@@ -1032,6 +1025,14 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 	}
 
 	if (_tcscmp(argv[1], _T("/list")) == 0) {
+#ifndef _DEBUG
+#ifdef _WIN64
+		_tprintf_s(_T("HiJack [Version " HIJACK_VERSION "]\n\n"));
+#else
+		_tprintf_s(_T("HiJack32 [Version " HIJACK_VERSION "]\n\n"));
+#endif
+#endif // !_DEBUG
+
 		HKEY hKey = nullptr;
 		if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, _T("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options"), 0, KEY_READ, &hKey) != ERROR_SUCCESS) {
 			_tprintf_s(_T("ERROR: RegOpenKeyEx (Error = 0x%08X)\n"), GetLastError());
@@ -1063,6 +1064,14 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 	}
 
 	if (_tcscmp(argv[1], _T("/add")) == 0) {
+#ifndef _DEBUG
+#ifdef _WIN64
+		_tprintf_s(_T("HiJack [Version " HIJACK_VERSION "]\n\n"));
+#else
+		_tprintf_s(_T("HiJack32 [Version " HIJACK_VERSION "]\n\n"));
+#endif
+#endif // !_DEBUG
+
 		if (argc < 3) {
 			ShowHelp();
 			return EXIT_SUCCESS;
@@ -1124,6 +1133,14 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 	}
 
 	if (_tcscmp(argv[1], _T("/remove")) == 0) {
+#ifndef _DEBUG
+#ifdef _WIN64
+		_tprintf_s(_T("HiJack [Version " HIJACK_VERSION "]\n\n"));
+#else
+		_tprintf_s(_T("HiJack32 [Version " HIJACK_VERSION "]\n\n"));
+#endif
+#endif // !_DEBUG
+
 		if (argc < 3) {
 			ShowHelp();
 			return EXIT_SUCCESS;
