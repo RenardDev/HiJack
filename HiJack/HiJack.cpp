@@ -40,9 +40,104 @@ EXTERN_C NTSYSCALLAPI NTSTATUS NTAPI NtResumeProcess(HANDLE ProcessHandle);
 std::unordered_map<DWORD, HANDLE> g_Processes;
 bool g_bContinueDebugging = true;
 
-HANDLE g_hStdInput = nullptr;
-HANDLE g_hStdOutput = nullptr;
-HANDLE g_hStdError = nullptr;
+bool IsRunningAsAdmin() {
+	SID_IDENTIFIER_AUTHORITY NT_AUTHORITY = SECURITY_NT_AUTHORITY;
+	PSID AdministratorsGroup = nullptr;
+	if (!AllocateAndInitializeSid(&NT_AUTHORITY, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &AdministratorsGroup)) {
+		return false;
+	}
+
+	BOOL bIsAdmin = FALSE;
+	if (!CheckTokenMembership(NULL, AdministratorsGroup, &bIsAdmin)) {
+		FreeSid(AdministratorsGroup);
+		return false;
+	}
+
+	return bIsAdmin;
+}
+
+bool ReLaunchAsAdmin(bool bAllowCancel = false) {
+	TCHAR szPath[MAX_PATH];
+	if (!GetModuleFileName(NULL, szPath, MAX_PATH)) {
+		return false;
+	}
+
+	LPCTSTR szCommandLine = GetCommandLine();
+	LPCTSTR szArguments = _tcsstr(szCommandLine, _T(" "));
+	if (!szArguments) {
+		return false;
+	}
+
+	SHELLEXECUTEINFO sei = {};
+	sei.cbSize = sizeof(SHELLEXECUTEINFO);
+	sei.lpVerb = _T("runas");
+	sei.lpFile = szPath;
+	sei.lpParameters = szArguments;
+	sei.nShow = SW_NORMAL;
+
+	if (!ShellExecuteEx(&sei)) {
+		if (bAllowCancel && (GetLastError() == ERROR_CANCELLED)) {
+			return true;
+		}
+
+		return false;
+	}
+
+	return true;
+}
+
+bool InitializeIOHandles(IO_HANDLES& IOHandles) {
+	if (!CreatePipe(&IOHandles.m_hPipeInRead, &IOHandles.m_hPipeInWrite, NULL, 0)) {
+		return false;
+	}
+
+	if (!CreatePipe(&IOHandles.m_hPipeOutRead, &IOHandles.m_hPipeOutWrite, NULL, 0)) {
+		CloseHandle(IOHandles.m_hPipeInRead);
+		IOHandles.m_hPipeInRead = nullptr;
+		CloseHandle(IOHandles.m_hPipeInWrite);
+		IOHandles.m_hPipeInWrite = nullptr;
+		return false;
+	}
+
+	if (!CreatePipe(&IOHandles.m_hPipeErrorRead, &IOHandles.m_hPipeErrorWrite, NULL, 0)) {
+	 	CloseHandle(IOHandles.m_hPipeOutRead);
+		IOHandles.m_hPipeOutRead = nullptr;
+		CloseHandle(IOHandles.m_hPipeOutWrite);
+		IOHandles.m_hPipeOutWrite = nullptr;
+	 	CloseHandle(IOHandles.m_hPipeInRead);
+		IOHandles.m_hPipeInRead = nullptr;
+		CloseHandle(IOHandles.m_hPipeInWrite);
+		IOHandles.m_hPipeInWrite = nullptr;
+		return false;
+	}
+
+	return true;
+}
+
+bool CloseIOHandles(IO_HANDLES& IOHandles) {
+	if (!CreatePipe(&IOHandles.m_hPipeInRead, &IOHandles.m_hPipeInWrite, NULL, 0)) {
+		return false;
+	}
+
+	if (!CreatePipe(&IOHandles.m_hPipeOutRead, &IOHandles.m_hPipeOutWrite, NULL, 0)) {
+		CloseHandle(IOHandles.m_hPipeInRead);
+		IOHandles.m_hPipeInRead = nullptr;
+		CloseHandle(IOHandles.m_hPipeInWrite);
+		IOHandles.m_hPipeInWrite = nullptr;
+		return false;
+	}
+
+	if (!CreatePipe(&IOHandles.m_hPipeErrorRead, &IOHandles.m_hPipeErrorWrite, NULL, 0)) {
+	 	CloseHandle(IOHandles.m_hPipeOutRead);
+		IOHandles.m_hPipeOutRead = nullptr;
+		CloseHandle(IOHandles.m_hPipeOutWrite);
+		IOHandles.m_hPipeOutWrite = nullptr;
+	 	CloseHandle(IOHandles.m_hPipeInRead);
+		IOHandles.m_hPipeInRead = nullptr;
+		CloseHandle(IOHandles.m_hPipeInWrite);
+		IOHandles.m_hPipeInWrite = nullptr;
+		return false;
+	}
 
 bool EnableDebugPrivilege(HANDLE hProcess, bool bEnable) {
 	HANDLE hToken = nullptr;
