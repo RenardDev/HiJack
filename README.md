@@ -1,18 +1,22 @@
 # HiJack
-A tool that uses Windows mechanics to intercept process creation by adding a debugger to the registry.
+A utility leveraging Windows mechanisms to intercept process creation by registering a debugger in the system registry.
 
 # Commands
 ```
-HiJack.exe /add <Filename>
-HiJack.exe /remove <Filename>
+HiJack.exe /list
+HiJack.exe /add <File Name>
+HiJack.exe /remove <File Name>
 ```
 
 # Usage
-For example, we have `hello.exe`, which needs to be intercepted, to do this, we need to execute:
+To intercept a process, such as hello.exe, execute the following command:
 ```
 HiJack.exe /add hello.exe
 ```
-After this, HiJack will intercept the process and inject into it the library `<filename>_hijack.dll` (`hello_hijack.dll`), which is located in the same directory as `hello.exe`.
+This will enable HiJack to intercept the process creation of `hello.exe` and inject the library `<File Name>_hijack.dll` (e.g., `hello_hijack.dll`). The DLL must be located in the same directory as the intercepted executable.
 
 # NOTE
-For 32-bit processes you need to use 32-bit HiJack. Same for 64-bit.
+* Ensure that you use the appropriate version of HiJack:
+  - Use the 32-bit version for 32-bit processes.
+  - Use the 64-bit version for 64-bit processes.
+* The 32-bit version of HiJack can utilize the 64-bit version if both executables are placed in the same directory.
