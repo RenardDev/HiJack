@@ -1315,7 +1315,7 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 
 		DWORD dwAttrib = GetFileAttributes(szProcessPath);
 		if (!((dwAttrib != INVALID_FILE_ATTRIBUTES) && !(dwAttrib & FILE_ATTRIBUTE_DIRECTORY))) {
-			_tprintf_s(_T("ERROR: This process cannot be run in 32 bit!\n"));
+			_tprintf_s(_T("ERROR: This process cannot be run in 64 bit!\n"));
 			CloseHandle(hJob);
 			return EXIT_FAILURE;
 		}
