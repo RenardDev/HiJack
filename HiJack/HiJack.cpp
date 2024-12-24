@@ -31,7 +31,7 @@ using tstring = std::basic_string<TCHAR, std::char_traits<TCHAR>, std::allocator
 
 // General definitions
 
-#define HIJACK_VERSION "1.1.1"
+#define HIJACK_VERSION "1.1.2"
 
 #define ProcessDebugFlags static_cast<PROCESSINFOCLASS>(0x1F)
 #define SafeCloseHandle(x) if ((x) && (x != INVALID_HANDLE_VALUE)) { CloseHandle(x); }
@@ -72,7 +72,7 @@ bool ReLaunchAsAdmin(bool bAllowCancel = false) {
 	LPCTSTR szCommandLine = GetCommandLine();
 	LPCTSTR szArguments = _tcsstr(szCommandLine, _T(" "));
 	if (!szArguments) {
-		_tprintf_s(_T("ERROR: _tcsstr (Error = 0x%08X)\n"), GetLastError());
+		_tprintf_s(_T("ERROR: _tcsstr\n"));
 		return false;
 	}
 
@@ -168,8 +168,9 @@ tstring GetProcessDirectory(HANDLE hProcess) {
 	}
 
 	TCHAR szDrive[_MAX_DRIVE] = {}, szDir[_MAX_DIR] = {};
-	if (_tsplitpath_s(ProcessPath.c_str(), szDrive, _countof(szDrive), szDir, _countof(szDir), nullptr, 0, nullptr, 0) != 0) {
-		_tprintf_s(_T("ERROR: _tsplitpath_s (Error = 0x%08X)\n"), GetLastError());
+	errno_t err = _tsplitpath_s(ProcessPath.c_str(), szDrive, _countof(szDrive), szDir, _countof(szDir), nullptr, 0, nullptr, 0);
+	if (err != 0) {
+		_tprintf_s(_T("ERROR: _tsplitpath_s (Error = %i)\n"), err);
 		return _T("");
 	}
 
@@ -189,8 +190,9 @@ tstring GetProcessName(HANDLE hProcess) {
 	}
 
 	TCHAR szName[_MAX_FNAME] = {}, szExt[_MAX_EXT] = {};
-	if (_tsplitpath_s(ProcessPath.c_str(), nullptr, 0, nullptr, 0, szName, _countof(szName), szExt, _countof(szExt)) != 0) {
-		_tprintf_s(_T("ERROR: _tsplitpath_s (Error = 0x%08X)\n"), GetLastError());
+	errno_t err = _tsplitpath_s(ProcessPath.c_str(), nullptr, 0, nullptr, 0, szName, _countof(szName), szExt, _countof(szExt));
+	if (err != 0) {
+		_tprintf_s(_T("ERROR: _tsplitpath_s (Error = %i)\n"), err);
 		return _T("");
 	}
 
@@ -263,8 +265,9 @@ tstring GetFileNameFromHandle(HANDLE hFile) {
 	}
 
 	TCHAR szName[_MAX_FNAME] = {}, szExt[_MAX_EXT] = {};
-	if (_tsplitpath_s(szFileName, nullptr, 0, nullptr, 0, szName, _countof(szName), szExt, _countof(szExt)) != 0) {
-		_tprintf_s(_T("ERROR: _tsplitpath_s (Error = 0x%08X)\n"), GetLastError());
+	errno_t err = _tsplitpath_s(szFileName, nullptr, 0, nullptr, 0, szName, _countof(szName), szExt, _countof(szExt));
+	if (err != 0) {
+		_tprintf_s(_T("ERROR: _tsplitpath_s (Error = %i)\n"), err);
 		return _T("");
 	}
 
@@ -393,8 +396,9 @@ tstring GetProcessHiJackLibraryName(HANDLE hProcess) {
 	}
 
 	TCHAR szName[_MAX_FNAME] = {};
-	if (_tsplitpath_s(ProcessName.c_str(), nullptr, 0, nullptr, 0, szName, _countof(szName), nullptr, 0) != 0) {
-		_tprintf_s(_T("ERROR: _tsplitpath_s (Error = 0x%08X)\n"), GetLastError());
+	errno_t err = _tsplitpath_s(ProcessName.c_str(), nullptr, 0, nullptr, 0, szName, _countof(szName), nullptr, 0);
+	if (err != 0) {
+		_tprintf_s(_T("ERROR: _tsplitpath_s (Error = %i)\n"), err);
 		return _T("");
 	}
 
@@ -619,7 +623,7 @@ void OnLoadModuleEvent(DWORD ProcessId, LPVOID ImageBase, HANDLE hFile) {
 
 		DWORD dwAttrib = GetFileAttributes(ProcessHiJackLibraryPath.c_str());
 		if (!((dwAttrib != INVALID_FILE_ATTRIBUTES) && !(dwAttrib & FILE_ATTRIBUTE_DIRECTORY))) {
-			return; // Not exist file
+			return; // File not exist
 		}
 
 		HANDLE hProcessFile = CreateFile(ProcessHiJackLibraryPath.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -1088,7 +1092,7 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 
 		TCHAR szKey[MAX_PATH] = {};
 		if (_stprintf_s(szKey, _countof(szKey), _T("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\%s"), argv[2]) < 0) {
-			_tprintf_s(_T("ERROR: RegCreateKeyEx (Error = 0x%08X)\n"), GetLastError());
+			_tprintf_s(_T("ERROR: _stprintf_s (Error = 0x%08X)\n"), GetLastError());
 			return EXIT_FAILURE;
 		}
 
@@ -1265,6 +1269,86 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 	}
 
 #ifdef _WIN64
+	if (pTempNTHs->FileHeader.Machine == IMAGE_FILE_MACHINE_I386) {
+		UnmapViewOfFile(pMap);
+		CloseHandle(hMapFile);
+		CloseHandle(hProcessFile);
+
+		PWSTR szSelfProcessPath = NtCurrentTeb()->ProcessEnvironmentBlock->ProcessParameters->ImagePathName.Buffer;
+		if (!szSelfProcessPath) {
+			_tprintf_s(_T("ERROR: PEB\n"));
+			CloseHandle(hJob);
+			return EXIT_FAILURE;
+		}
+
+#ifndef _UNICODE
+		UNICODE_STRING us = {};
+		RtlInitUnicodeString(&us, szSelfProcessPath);
+
+		ANSI_STRING as = {};
+		NTSTATUS nStatus = RtlUnicodeStringToAnsiString(&as, &us, TRUE);
+		if (!NT_SUCCESS(nStatus)) {
+			_tprintf_s(_T("ERROR: RtlUnicodeStringToAnsiString (Error = 0x%08X)\n"), nStatus);
+			CloseHandle(hJob);
+			return EXIT_FAILURE;
+		}
+#endif // !_UNICODE
+
+		TCHAR szDrive[_MAX_DRIVE] = {}, szDir[_MAX_DIR] = {}, szName[_MAX_FNAME] = {}, szExt[_MAX_EXT] = {};
+#ifdef _UNICODE
+		errno_t err = _tsplitpath_s(szSelfProcessPath, szDrive, _countof(szDrive), szDir, _countof(szDir), szName, _countof(szName), szExt, _countof(szExt));
+#else
+		errno_t err = _tsplitpath_s(as.Buffer, szDrive, _countof(szDrive), szDir, _countof(szDir), szName, _countof(szName), szExt, _countof(szExt));
+#endif
+		if (err != 0) {
+			_tprintf_s(_T("ERROR: _tsplitpath_s (Error = %i)\n"), err);
+			CloseHandle(hJob);
+			return EXIT_FAILURE;
+		}
+
+		TCHAR szProcessPath[MAX_PATH] = {};
+		if (_stprintf_s(szProcessPath, _countof(szProcessPath), _T("%s%s%s32%s"), szDrive, szDir, szName, szExt) < 0) {
+			_tprintf_s(_T("ERROR: _stprintf_s (Error = 0x%08X)\n"), GetLastError());
+			CloseHandle(hJob);
+			return EXIT_FAILURE;
+		}
+
+		DWORD dwAttrib = GetFileAttributes(szProcessPath);
+		if (!((dwAttrib != INVALID_FILE_ATTRIBUTES) && !(dwAttrib & FILE_ATTRIBUTE_DIRECTORY))) {
+			_tprintf_s(_T("ERROR: This process cannot be run in 32 bit!\n"));
+			CloseHandle(hJob);
+			return EXIT_FAILURE;
+		}
+
+		STARTUPINFO si = {};
+		PROCESS_INFORMATION pi = {};
+		si.cb = sizeof(si);
+
+		if (!CreateProcess(szProcessPath, GetCommandLine(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi)) {
+			_tprintf_s(_T("ERROR: Failed to launch 64-bit version (Error = 0x%08X)\n"), GetLastError());
+			CloseHandle(hJob);
+			return EXIT_FAILURE;
+		}
+
+		if (WaitForSingleObject(pi.hProcess, INFINITE) != WAIT_OBJECT_0) {
+			_tprintf_s(_T("ERROR: WaitForSingleObject (Error = 0x%08X)\n"), GetLastError());
+			TerminateProcess(pi.hProcess, EXIT_FAILURE);
+			CloseHandles(pi);
+			CloseHandle(hJob);
+			return EXIT_FAILURE;
+		}
+
+		DWORD unExitCode = EXIT_FAILURE;
+		if (!GetExitCodeProcess(pi.hProcess, &unExitCode)) {
+			_tprintf_s(_T("ERROR: GetExitCodeProcess (Error = 0x%08X)\n"), GetLastError());
+			CloseHandles(pi);
+			CloseHandle(hJob);
+			return EXIT_FAILURE;
+		}
+
+		return unExitCode;
+	}
+
 	if (pTempNTHs->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64) {
 		_tprintf_s(_T("ERROR: This process cannot be run in 64 bit!\n"));
 		UnmapViewOfFile(pMap);
@@ -1311,11 +1395,12 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 
 		TCHAR szDrive[_MAX_DRIVE] = {}, szDir[_MAX_DIR] = {}, szName[_MAX_FNAME] = {}, szExt[_MAX_EXT] = {};
 #ifdef _UNICODE
-		if (_tsplitpath_s(ProcessPath.c_str(), szDrive, _countof(szDrive), szDir, _countof(szDir), szName, _countof(szName), szExt, _countof(szExt)) != 0) {
+		errno_t err = _tsplitpath_s(szSelfProcessPath, szDrive, _countof(szDrive), szDir, _countof(szDir), szName, _countof(szName), szExt, _countof(szExt));
 #else
-		if (_tsplitpath_s(as.Buffer, szDrive, _countof(szDrive), szDir, _countof(szDir), szName, _countof(szName), szExt, _countof(szExt)) != 0) {
+		errno_t err = _tsplitpath_s(as.Buffer, szDrive, _countof(szDrive), szDir, _countof(szDir), szName, _countof(szName), szExt, _countof(szExt));
 #endif
-			_tprintf_s(_T("ERROR: _tsplitpath_s (Error = 0x%08X)\n"), nStatus);
+		if (err != 0) {
+			_tprintf_s(_T("ERROR: _tsplitpath_s (Error = %i)\n"), err);
 			CloseHandle(hJob);
 			return EXIT_FAILURE;
 		}
@@ -1328,7 +1413,7 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 
 		TCHAR szProcessPath[MAX_PATH] = {};
 		if (_stprintf_s(szProcessPath, _countof(szProcessPath), _T("%s%s%s%s"), szDrive, szDir, szName, szExt) < 0) {
-			_tprintf_s(_T("ERROR: _stprintf_s (Error = 0x%08X)\n"), nStatus);
+			_tprintf_s(_T("ERROR: _stprintf_s (Error = 0x%08X)\n"), GetLastError());
 			CloseHandle(hJob);
 			return EXIT_FAILURE;
 		}

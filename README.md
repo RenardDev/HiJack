@@ -20,3 +20,4 @@ This will enable HiJack to intercept the process creation of `hello.exe` and inj
   - Use the 32-bit version for 32-bit processes.
   - Use the 64-bit version for 64-bit processes.
 * The 32-bit version of HiJack can utilize the 64-bit version if both executables are placed in the same directory.
+* The 64-bit version of HiJack can utilize the 32-bit version if both executables are placed in the same directory.
