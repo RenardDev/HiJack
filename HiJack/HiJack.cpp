@@ -31,7 +31,7 @@ using tstring = std::basic_string<TCHAR, std::char_traits<TCHAR>, std::allocator
 
 // General definitions
 
-#define HIJACK_VERSION "1.1.2"
+#define HIJACK_VERSION "1.1.3"
 
 #define ProcessDebugFlags static_cast<PROCESSINFOCLASS>(0x1F)
 #define SafeCloseHandle(x) if ((x) && (x != INVALID_HANDLE_VALUE)) { CloseHandle(x); }
