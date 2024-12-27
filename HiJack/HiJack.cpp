@@ -1,4 +1,4 @@
-﻿
+
 // Default
 #include <Windows.h>
 #include <winternl.h>
@@ -885,14 +885,14 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 							g_Threads[DebugEvent.dwProcessId] = std::unordered_map<DWORD, HANDLE>();
 						}
 
-						g_Threads[DebugEvent.dwProcessId][DebugEvent.dwThreadId] = DebugEvent.u.CreateThread.hThread;
+						g_Threads[DebugEvent.dwProcessId][DebugEvent.dwThreadId] = DebugEvent.u.CreateProcessInfo.hThread;
 					}
 					{
 						if (g_Modules.find(DebugEvent.dwProcessId) == g_Modules.end()) {
 							g_Modules[DebugEvent.dwProcessId] = std::unordered_map<LPVOID, tstring>();
 						}
 
-						g_Modules[DebugEvent.dwProcessId][DebugEvent.u.LoadDll.lpBaseOfDll] = GetFileNameFromHandle(DebugEvent.u.CreateThread.hThread);
+						g_Modules[DebugEvent.dwProcessId][DebugEvent.u.LoadDll.lpBaseOfDll] = GetFileNameFromHandle(DebugEvent.u.CreateProcessInfo.hThread);
 					}
 
 					OnCreateProcessEvent(DebugEvent.dwProcessId);
