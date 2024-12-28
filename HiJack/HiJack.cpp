@@ -33,6 +33,10 @@ using tstring_optional = std::pair<bool, tstring>;
 // General definitions
 
 #define HIJACK_VERSION "1.1.3"
+#ifndef _DEBUG
+#define HIJACK_DETACH_IF_NO_INJECTABLE
+#define HIJACK_DETACH_AFTER_INJECT
+#endif
 
 #define ProcessDebugFlags static_cast<PROCESSINFOCLASS>(0x1F)
 #define SafeCloseHandle(x) if ((x) && (x != INVALID_HANDLE_VALUE)) { CloseHandle(x); }
@@ -671,6 +675,7 @@ void OnLoadModuleEvent(DWORD unProcessID, LPVOID pImageBase) {
 		return;
 	}
 
+#ifndef HIJACK_DETACH_AFTER_INJECT
 	if (ModuleFileName.second == ProcessInjectLibraryName.second) {
 #ifdef _DEBUG
 		_tprintf_s(_T("INJECTED!\n"));
@@ -678,6 +683,7 @@ void OnLoadModuleEvent(DWORD unProcessID, LPVOID pImageBase) {
 		g_bContinueDebugging = false;
 		return;
 	}
+#endif
 
 	auto InjectedModules = g_InjectedModules.find(unProcessID);
 	if ((InjectedModules == g_InjectedModules.end()) && (ModuleFileName.second == _T("kernelbase.dll"))) {
@@ -690,7 +696,9 @@ void OnLoadModuleEvent(DWORD unProcessID, LPVOID pImageBase) {
 
 		DWORD dwAttrib = GetFileAttributes(ProcessHiJackLibraryPath.c_str());
 		if (!((dwAttrib != INVALID_FILE_ATTRIBUTES) && !(dwAttrib & FILE_ATTRIBUTE_DIRECTORY))) { // File not exist
+#ifndef HIJACK_DETACH_IF_NO_INJECTABLE
 			g_bContinueDebugging = false;
+#endif
 			return;
 		}
 
