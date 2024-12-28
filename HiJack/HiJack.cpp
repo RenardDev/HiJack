@@ -28,6 +28,7 @@
 
 // Types
 using tstring = std::basic_string<TCHAR, std::char_traits<TCHAR>, std::allocator<TCHAR>>;
+using tstring_optional = std::pair<bool, tstring>;
 
 // General definitions
 
@@ -39,10 +40,30 @@ using tstring = std::basic_string<TCHAR, std::char_traits<TCHAR>, std::allocator
 EXTERN_C NTSYSCALLAPI NTSTATUS NTAPI NtSetInformationProcess(_In_ HANDLE ProcessHandle, _In_ PROCESSINFOCLASS ProcessInformationClass, _In_reads_bytes_(ProcessInformationLength) PVOID ProcessInformation, _In_ ULONG ProcessInformationLength);
 EXTERN_C NTSYSCALLAPI NTSTATUS NTAPI NtResumeProcess(HANDLE ProcessHandle);
 
+// [{
+//     PID: HANDLE
+// }]
 std::unordered_map<DWORD, HANDLE> g_Processes;
-std::unordered_map<DWORD, std::unordered_map<DWORD, HANDLE>> g_Threads;
-std::unordered_map<DWORD, std::unordered_map<LPVOID, tstring>> g_Modules;
+
+// [{
+//     PID: [{
+//         TID: (HANDLE, START ADDRESS)
+//     }]
+// }]
+std::unordered_map<DWORD, std::unordered_map<DWORD, std::pair<HANDLE, LPVOID>>> g_Threads;
+
+// [{
+//     PID: [{
+//         BASE ADDRESS: FULL MODULE PATH
+//     }]
+// }]
+std::unordered_map<DWORD, std::unordered_map<LPVOID, tstring_optional>> g_Modules;
+
+// [{
+//     PID: [(ALLOCATED PAGE, REMOTE THREAD)]
+// }]
 std::unordered_map<DWORD, std::pair<void*, HANDLE>> g_InjectedModules;
+
 bool g_bContinueDebugging = true;
 
 bool IsRunningAsAdmin() {
@@ -77,7 +98,7 @@ bool ReLaunchAsAdmin(bool bAllowCancel = false) {
 	}
 
 	SHELLEXECUTEINFO sei = {};
-	sei.cbSize = sizeof(SHELLEXECUTEINFO);
+	sei.cbSize = sizeof(sei);
 	sei.lpVerb = _T("runas");
 	sei.lpFile = szPath;
 	sei.lpParameters = szArguments;
@@ -124,11 +145,11 @@ bool EnableDebugPrivilege(HANDLE hProcess, bool bEnable) {
 	return true;
 }
 
-tstring GetProcessPath(HANDLE hProcess) {
+tstring_optional GetProcessPath(HANDLE hProcess) {
 	TCHAR szProcessPath[MAX_PATH + 1] = {};
 	if (!GetProcessImageFileName(hProcess, szProcessPath, _countof(szProcessPath))) {
 		_tprintf_s(_T("ERROR: GetProcessImageFileName (Error = 0x%08X)\n"), GetLastError());
-		return _T("");
+		return { false, _T("") };
 	}
 
 	TCHAR szTemp[MAX_PATH * 2] = {};
@@ -142,13 +163,13 @@ tstring GetProcessPath(HANDLE hProcess) {
 			*szDrive = *p;
 
 			if (QueryDosDevice(szDrive, szName, MAX_PATH)) {
-				size_t unNameLen = _tcslen(szName);
+				size_t unNameLength = _tcslen(szName);
 
-				if (unNameLen < MAX_PATH) {
-					bFound = (_tcsnicmp(szProcessPath, szName, unNameLen) == 0) && (*(szProcessPath + unNameLen) == _T('\\'));
+				if (unNameLength < MAX_PATH) {
+					bFound = (_tcsnicmp(szProcessPath, szName, unNameLength) == 0) && (*(szProcessPath + unNameLength) == _T('\\'));
 					if (bFound) {
 						TCHAR szTempFile[MAX_PATH];
-						StringCchPrintf(szTempFile, MAX_PATH, TEXT("%s%s"), szDrive, szProcessPath + unNameLen);
+						StringCchPrintf(szTempFile, MAX_PATH, TEXT("%s%s"), szDrive, szProcessPath + unNameLength);
 						StringCchCopyN(szProcessPath, MAX_PATH + 1, szTempFile, _tcslen(szTempFile));
 					}
 				}
@@ -158,80 +179,83 @@ tstring GetProcessPath(HANDLE hProcess) {
 		} while (!bFound && *p);
 	}
 
-	return szProcessPath;
+	return { true, szProcessPath };
 }
 
-tstring GetProcessDirectory(HANDLE hProcess) {
+tstring_optional GetProcessDirectory(HANDLE hProcess) {
 	auto ProcessPath = GetProcessPath(hProcess);
-	if (ProcessPath.empty()) {
-		return _T("");
+	if (!ProcessPath.first) {
+		return { false, _T("") };
 	}
 
-	TCHAR szDrive[_MAX_DRIVE] = {}, szDir[_MAX_DIR] = {};
-	errno_t err = _tsplitpath_s(ProcessPath.c_str(), szDrive, _countof(szDrive), szDir, _countof(szDir), nullptr, 0, nullptr, 0);
+	TCHAR szDrive[_MAX_DRIVE] = {}, szDirectory[_MAX_DIR] = {};
+	errno_t err = _tsplitpath_s(ProcessPath.second.c_str(), szDrive, _countof(szDrive), szDirectory, _countof(szDirectory), nullptr, 0, nullptr, 0);
 	if (err != 0) {
 		_tprintf_s(_T("ERROR: _tsplitpath_s (Error = %i)\n"), err);
-		return _T("");
+		return { false, _T("") };
 	}
 
 	TCHAR szProcessDirectory[MAX_PATH] = {};
-	if (_stprintf_s(szProcessDirectory, _countof(szProcessDirectory), _T("%s%s"), szDrive, szDir) < 0) {
+	if (_stprintf_s(szProcessDirectory, _countof(szProcessDirectory), _T("%s%s"), szDrive, szDirectory) < 0) {
 		_tprintf_s(_T("ERROR: _stprintf_s (Error = 0x%08X)\n"), GetLastError());
-		return _T("");
+		return { false, _T("") };
 	}
 
-	return szProcessDirectory;
+	return { true, szProcessDirectory };
 }
 
-tstring GetProcessName(HANDLE hProcess) {
+tstring_optional GetProcessName(HANDLE hProcess) {
 	auto ProcessPath = GetProcessPath(hProcess);
-	if (ProcessPath.empty()) {
-		return _T("");
+	if (!ProcessPath.first) {
+		return { false, _T("") };
 	}
 
 	TCHAR szName[_MAX_FNAME] = {}, szExt[_MAX_EXT] = {};
-	errno_t err = _tsplitpath_s(ProcessPath.c_str(), nullptr, 0, nullptr, 0, szName, _countof(szName), szExt, _countof(szExt));
+	errno_t err = _tsplitpath_s(ProcessPath.second.c_str(), nullptr, 0, nullptr, 0, szName, _countof(szName), szExt, _countof(szExt));
 	if (err != 0) {
 		_tprintf_s(_T("ERROR: _tsplitpath_s (Error = %i)\n"), err);
-		return _T("");
+		return { false, _T("") };
 	}
 
 	TCHAR szProcessName[MAX_PATH] = {};
 	if (_stprintf_s(szProcessName, _countof(szProcessName), _T("%s%s"), szName, szExt) < 0) {
 		_tprintf_s(_T("ERROR: _stprintf_s (Error = 0x%08X)\n"), GetLastError());
-		return _T("");
+		return { false, _T("") };
 	}
 
-	return szProcessName;
+	tstring ProcessName = szProcessName;
+
+	std::transform(ProcessName.begin(), ProcessName.end(), ProcessName.begin(), [](TCHAR c) {
+#ifdef _UNICODE
+		return std::towlower(c);
+#else
+		return std::tolower(static_cast<unsigned char>(c));
+#endif
+	});
+
+	return { true, ProcessName };
 }
 
-tstring GetFileNameFromHandle(HANDLE hFile) {
-	DWORD dwFileSizeHi = 0;
-	DWORD dwFileSizeLo = GetFileSize(hFile, &dwFileSizeHi);
-	if ((dwFileSizeLo == 0) && (dwFileSizeHi == 0)) {
-		_tprintf_s(_T("ERROR: GetFileSize (Error = 0x%08X)\n"), GetLastError());
-		return _T("");
-	}
-
+tstring_optional GetFilePath(HANDLE hFile) {
 	HANDLE hFileMap = CreateFileMapping(hFile, nullptr, PAGE_READONLY, 0, 1, nullptr);
 	if (!hFileMap || (hFileMap == INVALID_HANDLE_VALUE)) {
 		_tprintf_s(_T("ERROR: CreateFileMapping (Error = 0x%08X)\n"), GetLastError());
-		return _T("");
+		return { false, _T("") };
 	}
 
 	void* pMem = MapViewOfFile(hFileMap, FILE_MAP_READ, 0, 0, 1);
 	if (!pMem) {
 		_tprintf_s(_T("ERROR: MapViewOfFile (Error = 0x%08X)\n"), GetLastError());
 		CloseHandle(hFileMap);
-		return _T("");
+		return { false, _T("") };
 	}
 
-	TCHAR szFileName[MAX_PATH + 1] = {};
-	if (!GetMappedFileName(GetCurrentProcess(), pMem, szFileName, _countof(szFileName))) {
+	TCHAR szFilePath[MAX_PATH + 1] = {};
+	if (!GetMappedFileName(GetCurrentProcess(), pMem, szFilePath, _countof(szFilePath))) {
 		_tprintf_s(_T("ERROR: GetMappedFileName (Error = 0x%08X)\n"), GetLastError());
 		UnmapViewOfFile(pMem);
 		CloseHandle(hFileMap);
-		return _T("");
+		return { false, _T("") };
 	}
 
 	UnmapViewOfFile(pMem);
@@ -248,14 +272,14 @@ tstring GetFileNameFromHandle(HANDLE hFile) {
 			*szDrive = *p;
 
 			if (QueryDosDevice(szDrive, szName, MAX_PATH)) {
-				size_t unNameLen = _tcslen(szName);
+				size_t unNameLength = _tcslen(szName);
 
-				if (unNameLen < MAX_PATH) {
-					bFound = (_tcsnicmp(szFileName, szName, unNameLen) == 0) && (*(szFileName + unNameLen) == _T('\\'));
+				if (unNameLength < MAX_PATH) {
+					bFound = (_tcsnicmp(szFilePath, szName, unNameLength) == 0) && (*(szFilePath + unNameLength) == _T('\\'));
 					if (bFound) {
 						TCHAR szTempFile[MAX_PATH];
-						StringCchPrintf(szTempFile, MAX_PATH, TEXT("%s%s"), szDrive, szFileName + unNameLen);
-						StringCchCopyN(szFileName, MAX_PATH + 1, szTempFile, _tcslen(szTempFile));
+						StringCchPrintf(szTempFile, MAX_PATH, TEXT("%s%s"), szDrive, szFilePath + unNameLength);
+						StringCchCopyN(szFilePath, MAX_PATH + 1, szTempFile, _tcslen(szTempFile));
 					}
 				}
 			}
@@ -264,22 +288,53 @@ tstring GetFileNameFromHandle(HANDLE hFile) {
 		} while (!bFound && *p);
 	}
 
-	TCHAR szName[_MAX_FNAME] = {}, szExt[_MAX_EXT] = {};
-	errno_t err = _tsplitpath_s(szFileName, nullptr, 0, nullptr, 0, szName, _countof(szName), szExt, _countof(szExt));
+	return { true, szFilePath };
+}
+
+tstring_optional GetFileDirectory(HANDLE hFile) {
+	auto FilePath = GetFilePath(hFile);
+	if (!FilePath.first) {
+		return { false, _T("") };
+	}
+
+	TCHAR szDrive[_MAX_DRIVE] = {}, szDirectory[_MAX_DIR] = {};
+	errno_t err = _tsplitpath_s(FilePath.second.c_str(), szDrive, _countof(szDrive), szDirectory, _countof(szDirectory), nullptr, 0, nullptr, 0);
 	if (err != 0) {
 		_tprintf_s(_T("ERROR: _tsplitpath_s (Error = %i)\n"), err);
-		return _T("");
+		return { false, _T("") };
 	}
 
-	TCHAR szResultFileName[MAX_PATH] = {};
-	if (_stprintf_s(szResultFileName, _countof(szResultFileName), _T("%s%s"), szName, szExt) < 0) {
+	TCHAR szFileDirectory[MAX_PATH] = {};
+	if (_stprintf_s(szFileDirectory, _countof(szFileDirectory), _T("%s%s"), szDrive, szDirectory) < 0) {
 		_tprintf_s(_T("ERROR: _stprintf_s (Error = 0x%08X)\n"), GetLastError());
-		return _T("");
+		return { false, _T("") };
 	}
 
-	tstring result = szResultFileName;
+	return { true, szFileDirectory };
+}
 
-	std::transform(result.begin(), result.end(), result.begin(), [](TCHAR c) {
+tstring_optional GetFileName(HANDLE hFile) {
+	auto FilePath = GetFilePath(hFile);
+	if (!FilePath.first) {
+		return { false, _T("") };
+	}
+
+	TCHAR szName[_MAX_FNAME] = {}, szExt[_MAX_EXT] = {};
+	errno_t err = _tsplitpath_s(FilePath.second.c_str(), nullptr, 0, nullptr, 0, szName, _countof(szName), szExt, _countof(szExt));
+	if (err != 0) {
+		_tprintf_s(_T("ERROR: _tsplitpath_s (Error = %i)\n"), err);
+		return { false, _T("") };
+	}
+
+	TCHAR szFileName[MAX_PATH] = {};
+	if (_stprintf_s(szFileName, _countof(szFileName), _T("%s%s"), szName, szExt) < 0) {
+		_tprintf_s(_T("ERROR: _stprintf_s (Error = 0x%08X)\n"), GetLastError());
+		return { false, _T("") };
+	}
+
+	tstring FileName = szFileName;
+
+	std::transform(FileName.begin(), FileName.end(), FileName.begin(), [](TCHAR c) {
 #ifdef _UNICODE
 		return std::towlower(c);
 #else
@@ -287,132 +342,43 @@ tstring GetFileNameFromHandle(HANDLE hFile) {
 #endif
 	});
 
-	return result;
+	return { true, FileName };
 }
 
-/*
-bool SetHardwareBreakPoint(HANDLE hThread, LPVOID pAddress) {
-	CONTEXT CTX = {};
-	CTX.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-
-	if (SuspendThread(hThread) == static_cast<DWORD>(-1)) {
-		_tprintf_s(_T("ERROR: SuspendThread (Error = 0x%08X)\n"), GetLastError());
-		return false;
-	}
-
-	if (!GetThreadContext(hThread, &CTX)) {
-		_tprintf_s(_T("ERROR: GetThreadContext (Error = 0x%08X)\n"), GetLastError());
-		ResumeThread(hThread);
-		return false;
-	}
-
-	CTX.Dr0 = reinterpret_cast<DWORD_PTR>(pAddress);
-	CTX.Dr7 = 0x00000001;
-
-	if (!SetThreadContext(hThread, &CTX)) {
-		_tprintf_s(_T("ERROR: SetThreadContext (Error = 0x%08X)\n"), GetLastError());
-		ResumeThread(hThread);
-		return false;
-	}
-
-	if (ResumeThread(hThread) == static_cast<DWORD>(-1)) {
-		_tprintf_s(_T("ERROR: ResumeThread (Error = 0x%08X)\n"), GetLastError());
-		return false;
-	}
-
-	return true;
-}
-
-bool SetBreakPointAtEntryPoint(HANDLE hProcess, LPVOID pBaseAddress, HANDLE hThread) {
-	BYTE Buffer[0x1000];
-	SIZE_T unBytesRead = 0;
-	if (!ReadProcessMemory(hProcess, pBaseAddress, Buffer, sizeof(Buffer), &unBytesRead)) {
-		_tprintf_s(_T("ERROR: ReadProcessMemory (Error = 0x%08X)\n"), GetLastError());
-		return false;
-	}
-
-	PIMAGE_DOS_HEADER pDH = reinterpret_cast<PIMAGE_DOS_HEADER>(Buffer);
-	PIMAGE_NT_HEADERS pNTHs = reinterpret_cast<PIMAGE_NT_HEADERS>(reinterpret_cast<char*>(Buffer) + pDH->e_lfanew);
-
-	DWORD unEntryPointRVA = pNTHs->OptionalHeader.AddressOfEntryPoint;
-	if (!unEntryPointRVA) {
-		_tprintf_s(_T("ERROR: Process without entrypoint!\n"));
-		return false;
-	}
-
-	LPVOID pEntryPointAddress = reinterpret_cast<LPVOID>(reinterpret_cast<char*>(pBaseAddress) + unEntryPointRVA);
-	if (!SetHardwareBreakPoint(hThread, pEntryPointAddress)) {
-		return false;
-	}
-
-	return true;
-}
-
-void SetBreakPointsAtTLSCallbacks(HANDLE hProcess, LPVOID pBaseAddress, HANDLE hThread) {
-	BYTE Buffer[0x1000];
-	SIZE_T unBytesRead = 0;
-	if (!ReadProcessMemory(hProcess, pBaseAddress, Buffer, sizeof(Buffer), &unBytesRead)) {
-		_tprintf_s(_T("WARNING: ReadProcessMemory (Error = 0x%08X)\n"), GetLastError());
-		return;
-	}
-
-	PIMAGE_DOS_HEADER pDH = reinterpret_cast<PIMAGE_DOS_HEADER>(Buffer);
-	PIMAGE_NT_HEADERS pNTHs = reinterpret_cast<PIMAGE_NT_HEADERS>(reinterpret_cast<char*>(Buffer) + pDH->e_lfanew);
-
-	DWORD TLSDirectoryRVA = pNTHs->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS].VirtualAddress;
-	if (!TLSDirectoryRVA) {
-		return;
-	}
-
-	IMAGE_TLS_DIRECTORY TLSDirectory;
-	unBytesRead = 0;
-	if (!ReadProcessMemory(hProcess, reinterpret_cast<void*>(reinterpret_cast<char*>(pBaseAddress) + TLSDirectoryRVA), &TLSDirectory, sizeof(TLSDirectory), &unBytesRead)) {
-		_tprintf_s(_T("ERROR: ReadProcessMemory (Error = 0x%08X)\n"), GetLastError());
-		return;
-	}
-
-	void** TLSCallbacks = reinterpret_cast<void**>(TLSDirectory.AddressOfCallBacks);
-	while (true) {
-		PVOID pCallBack = nullptr;
-		unBytesRead = 0;
-		if (!ReadProcessMemory(hProcess, TLSCallbacks, &pCallBack, sizeof(pCallBack), &unBytesRead) || !pCallBack) {
-			_tprintf_s(_T("WARNING: ReadProcessMemory (Error = 0x%08X)\n"), GetLastError());
-			break;
-		}
-
-		if (!SetHardwareBreakPoint(hThread, pCallBack)) {
-			break;
-		}
-
-		++TLSCallbacks;
-	}
-}
-*/
-
-tstring GetProcessHiJackLibraryName(HANDLE hProcess) {
-	auto ProcessName = GetProcessPath(hProcess);
-	if (ProcessName.empty()) {
-		return _T("");
+tstring_optional GetProcessHiJackLibraryName(HANDLE hProcess) {
+	auto ProcessPath = GetProcessPath(hProcess);
+	if (!ProcessPath.first) {
+		return { false, _T("") };
 	}
 
 	TCHAR szName[_MAX_FNAME] = {};
-	errno_t err = _tsplitpath_s(ProcessName.c_str(), nullptr, 0, nullptr, 0, szName, _countof(szName), nullptr, 0);
+	errno_t err = _tsplitpath_s(ProcessPath.second.c_str(), nullptr, 0, nullptr, 0, szName, _countof(szName), nullptr, 0);
 	if (err != 0) {
 		_tprintf_s(_T("ERROR: _tsplitpath_s (Error = %i)\n"), err);
-		return _T("");
+		return { false, _T("") };
 	}
 
-	TCHAR szProcessName[MAX_PATH] = {};
+	TCHAR szLibraryName[MAX_PATH] = {};
 #ifdef _WIN64
-	if (_stprintf_s(szProcessName, _countof(szProcessName), _T("%s_hijack.dll"), szName) < 0) {
+	if (_stprintf_s(szLibraryName, _countof(szLibraryName), _T("%s_hijack.dll"), szName) < 0) {
 #else
-	if (_stprintf_s(szProcessName, _countof(szProcessName), _T("%s_hijack32.dll"), szName) < 0) {
+	if (_stprintf_s(szLibraryName, _countof(szLibraryName), _T("%s_hijack32.dll"), szName) < 0) {
 #endif
 		_tprintf_s(_T("ERROR: _stprintf_s (Error = 0x%08X)\n"), GetLastError());
-		return _T("");
+		return { false, _T("") };
 	}
 
-	return szProcessName;
+	tstring LibraryName = szLibraryName;
+
+	std::transform(LibraryName.begin(), LibraryName.end(), LibraryName.begin(), [](TCHAR c) {
+#ifdef _UNICODE
+		return std::towlower(c);
+#else
+		return std::tolower(static_cast<unsigned char>(c));
+#endif
+	});
+
+	return { true, LibraryName };
 }
 
 bool CreateStandardProcess(const TCHAR* szFileName, PTCHAR szCommandLine, PROCESS_INFORMATION& pi) {
@@ -431,7 +397,7 @@ bool CreateProcessWithParent(const TCHAR* szFileName, PTCHAR szCommandLine, HAND
 	STARTUPINFOEX si = {};
 	si.StartupInfo.cb = sizeof(si);
 
-	/* Change parent (unstable and currently impossible to redirect stdin/stdout in right way)
+	/* FIXME: Changing parent is unstable and currently impossible to redirect stdin/stdout in right way
 	SIZE_T attrSize = 0;
 	InitializeProcThreadAttributeList(nullptr, 2, 0, &attrSize);
 	si.lpAttributeList = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(HeapAlloc(GetProcessHeap(), 0, attrSize));
@@ -489,7 +455,8 @@ bool CreateDebugProcess(const TCHAR* szFileName, PTCHAR szCommandLine, HANDLE hJ
 		}
 	}
 
-	if (hParentProcess && (GetProcessName(hParentProcess) == _T("explorer.exe"))) {
+	auto ProcessName = GetProcessName(hParentProcess);
+	if (hParentProcess && ProcessName.first && (ProcessName.second == _T("explorer.exe"))) {
 		CloseHandle(hParentProcess);
 		hParentProcess = nullptr;
 	}
@@ -539,91 +506,192 @@ bool CreateDebugProcess(const TCHAR* szFileName, PTCHAR szCommandLine, HANDLE hJ
 	return true;
 }
 
-void OnCreateProcessEvent(DWORD ProcessId) {
-	auto Process = g_Processes.find(ProcessId);
+HANDLE GetDebugProcess(DWORD unProcessID) {
+	auto Process = g_Processes.find(unProcessID);
 	if (Process == g_Processes.end()) {
-		return;
+		return nullptr;
 	}
 
+	return Process->second;
+}
+
+HANDLE GetDebugThread(DWORD unProcessID, DWORD unThreadID, LPVOID* ppStartAddress = nullptr) {
+	auto ProcessThreads = g_Threads.find(unProcessID);
+	if (ProcessThreads == g_Threads.end()) {
+		return nullptr;
+	}
+
+	auto Thread = ProcessThreads->second.find(unThreadID);
+	if (Thread == ProcessThreads->second.end()) {
+		return nullptr;
+	}
+
+	if (ppStartAddress) {
+		*ppStartAddress = Thread->second.second;
+	}
+
+	return Thread->second.first;
+}
+
+tstring_optional GetDebugModulePath(DWORD unProcessID, LPVOID pImageBase) {
+	auto ProcessModules = g_Modules.find(unProcessID);
+	if (ProcessModules == g_Modules.end()) {
+		return { false, _T("") };
+	}
+
+	auto Module = ProcessModules->second.find(pImageBase);
+	if (Module == ProcessModules->second.end()) {
+		return { false, _T("") };
+	}
+
+	if (!Module->second.first) {
+		return { false, _T("") };
+	}
+
+	return Module->second;
+}
+
+tstring_optional GetDebugModuleDirectory(DWORD unProcessID, LPVOID pImageBase) {
+	auto ProcessModules = g_Modules.find(unProcessID);
+	if (ProcessModules == g_Modules.end()) {
+		return { false, _T("") };
+	}
+
+	auto Module = ProcessModules->second.find(pImageBase);
+	if (Module == ProcessModules->second.end()) {
+		return { false, _T("") };
+	}
+
+	if (!Module->second.first) {
+		return { false, _T("") };
+	}
+
+	TCHAR szDrive[_MAX_DRIVE] = {}, szDirectory[_MAX_DIR] = {};
+	errno_t err = _tsplitpath_s(Module->second.second.c_str(), szDrive, _countof(szDrive), szDirectory, _countof(szDirectory), nullptr, 0, nullptr, 0);
+	if (err != 0) {
+		_tprintf_s(_T("ERROR: _tsplitpath_s (Error = %i)\n"), err);
+		return { false, _T("") };
+	}
+
+	TCHAR szFileDirectory[MAX_PATH] = {};
+	if (_stprintf_s(szFileDirectory, _countof(szFileDirectory), _T("%s%s"), szDrive, szDirectory) < 0) {
+		_tprintf_s(_T("ERROR: _stprintf_s (Error = 0x%08X)\n"), GetLastError());
+		return { false, _T("") };
+	}
+
+	return { true, szFileDirectory };
+}
+
+tstring_optional GetDebugModuleName(DWORD unProcessID, LPVOID pImageBase) {
+	auto ProcessModules = g_Modules.find(unProcessID);
+	if (ProcessModules == g_Modules.end()) {
+		return { false, _T("") };
+	}
+
+	auto Module = ProcessModules->second.find(pImageBase);
+	if (Module == ProcessModules->second.end()) {
+		return { false, _T("") };
+	}
+
+	if (!Module->second.first) {
+		return { false, _T("") };
+	}
+
+	TCHAR szName[_MAX_FNAME] = {}, szExt[_MAX_EXT] = {};
+	errno_t err = _tsplitpath_s(Module->second.second.c_str(), nullptr, 0, nullptr, 0, szName, _countof(szName), szExt, _countof(szExt));
+	if (err != 0) {
+		_tprintf_s(_T("ERROR: _tsplitpath_s (Error = %i)\n"), err);
+		return { false, _T("") };
+	}
+
+	TCHAR szFileName[MAX_PATH] = {};
+	if (_stprintf_s(szFileName, _countof(szFileName), _T("%s%s"), szName, szExt) < 0) {
+		_tprintf_s(_T("ERROR: _stprintf_s (Error = 0x%08X)\n"), GetLastError());
+		return { false, _T("") };
+	}
+
+	tstring FileName = szFileName;
+
+	std::transform(FileName.begin(), FileName.end(), FileName.begin(), [](TCHAR c) {
+#ifdef _UNICODE
+		return std::towlower(c);
+#else
+		return std::tolower(static_cast<unsigned char>(c));
+#endif
+	});
+
+	return { true, FileName };
+}
+
+void OnCreateProcessEvent(DWORD unProcessID) {
 #ifdef _DEBUG
-	_tprintf_s(_T("PROCESS CREATE: %lu\n"), ProcessId);
+	_tprintf_s(_T("PROCESS CREATE: %lu\n"), unProcessID);
 #endif // _DEBUG
 }
 
-void OnExitProcessEvent(DWORD ProcessId) {
-	auto Process = g_Processes.find(ProcessId);
-	if (Process == g_Processes.end()) {
-		return;
-	}
-
+void OnExitProcessEvent(DWORD unProcessID, DWORD unExitCode) {
 #ifdef _DEBUG
-	_tprintf_s(_T("PROCESS EXIT: %lu\n"), ProcessId);
+	_tprintf_s(_T("PROCESS EXIT: %lu\n"), unProcessID);
 #endif // _DEBUG
 }
 
-void OnCreateThreadEvent(DWORD ProcessId, DWORD ThreadId) {
-	auto Process = g_Processes.find(ProcessId);
-	if (Process == g_Processes.end()) {
-		return;
-	}
-
+void OnCreateThreadEvent(DWORD unProcessID, DWORD unThreadID) {
 #ifdef _DEBUG
-	_tprintf_s(_T("THREAD CREATE: %lu\n"), ThreadId);
+	_tprintf_s(_T("THREAD CREATE: %lu\n"), unThreadID);
 #endif // _DEBUG
 }
 
-void OnExitThreadEvent(DWORD ProcessId, DWORD ThreadId) {
-	auto Process = g_Processes.find(ProcessId);
-	if (Process == g_Processes.end()) {
-		return;
-	}
-
+void OnExitThreadEvent(DWORD unProcessID, DWORD unThreadID, DWORD unExitCode) {
 #ifdef _DEBUG
-	_tprintf_s(_T("THREAD EXIT: %lu\n"), ThreadId);
+	_tprintf_s(_T("THREAD EXIT: %lu\n"), unThreadID);
 #endif // _DEBUG
 }
 
-void OnLoadModuleEvent(DWORD ProcessId, LPVOID ImageBase, HANDLE hFile) {
-	auto Process = g_Processes.find(ProcessId);
-	if (Process == g_Processes.end()) {
+void OnLoadModuleEvent(DWORD unProcessID, LPVOID pImageBase) {
+	auto Process = GetDebugProcess(unProcessID);
+	if (!Process) {
 		return;
 	}
 
-	auto Modules = g_Modules.find(ProcessId);
-	if (Modules == g_Modules.end()) {
+	auto ModuleFileName = GetDebugModuleName(unProcessID, pImageBase);
+	if (!ModuleFileName.first) {
 		return;
 	}
-
-	auto Module = Modules->second.find(ImageBase);
-	if (Module == Modules->second.end()) {
-		return;
-	}
-
-	auto& ModuleFileName = Module->second;
 
 #ifdef _DEBUG
 #ifdef _WIN64
-	_tprintf_s(_T("MODULE LOAD: 0x%016llX - %s\n"), reinterpret_cast<size_t>(ImageBase), ModuleFileName.c_str());
+	_tprintf_s(_T("MODULE LOAD: 0x%016llX - %s\n"), reinterpret_cast<size_t>(pImageBase), ModuleFileName.second.c_str());
 #else
-	_tprintf_s(_T("MODULE LOAD: 0x%08X - %s\n"), reinterpret_cast<size_t>(ImageBase), ModuleFileName.c_str());
+	_tprintf_s(_T("MODULE LOAD: 0x%08X - %s\n"), reinterpret_cast<size_t>(pImageBase), ModuleFileName.second.c_str());
 #endif
 #endif // _DEBUG
 
-	auto InjectedModules = g_InjectedModules.find(ProcessId);
-	if ((InjectedModules == g_InjectedModules.end()) && (ModuleFileName == _T("kernelbase.dll"))) {
-		auto ProcessInjectLibraryName = GetProcessHiJackLibraryName(Process->second);
-		if (ProcessInjectLibraryName.empty()) {
+	auto ProcessInjectLibraryName = GetProcessHiJackLibraryName(Process);
+	if (!ProcessInjectLibraryName.first) {
+		return;
+	}
+
+	if (ModuleFileName.second == ProcessInjectLibraryName.second) {
+#ifdef _DEBUG
+		_tprintf_s(_T("INJECTED!\n"));
+#endif // _DEBUG
+		g_bContinueDebugging = false;
+		return;
+	}
+
+	auto InjectedModules = g_InjectedModules.find(unProcessID);
+	if ((InjectedModules == g_InjectedModules.end()) && (ModuleFileName.second == _T("kernelbase.dll"))) {
+		auto ProcessDirectory = GetProcessDirectory(Process);
+		if (!ProcessDirectory.first) {
 			return;
 		}
 
-		auto ProcessHiJackLibraryPath = GetProcessDirectory(Process->second) + ProcessInjectLibraryName;
-		if (ProcessHiJackLibraryPath.empty()) {
-			return;
-		}
+		auto ProcessHiJackLibraryPath = ProcessDirectory.second + ProcessInjectLibraryName.second;
 
 		DWORD dwAttrib = GetFileAttributes(ProcessHiJackLibraryPath.c_str());
-		if (!((dwAttrib != INVALID_FILE_ATTRIBUTES) && !(dwAttrib & FILE_ATTRIBUTE_DIRECTORY))) {
-			return; // File not exist
+		if (!((dwAttrib != INVALID_FILE_ATTRIBUTES) && !(dwAttrib & FILE_ATTRIBUTE_DIRECTORY))) { // File not exist
+			g_bContinueDebugging = false;
+			return;
 		}
 
 		HANDLE hProcessFile = CreateFile(ProcessHiJackLibraryPath.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -697,66 +765,61 @@ void OnLoadModuleEvent(DWORD ProcessId, LPVOID ImageBase, HANDLE hFile) {
 		CloseHandle(hMapFile);
 		CloseHandle(hProcessFile);
 
-		void* pAddress = VirtualAllocEx(Process->second, nullptr, (ProcessHiJackLibraryPath.length() + 1) * sizeof(TCHAR), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+		void* pAddress = VirtualAllocEx(Process, nullptr, (ProcessHiJackLibraryPath.length() + 1) * sizeof(TCHAR), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 		if (!pAddress) {
 			_tprintf_s(_T("ERROR: VirtualAllocEx (Error = 0x%08X)\n"), GetLastError());
 			return;
 		}
 
-		if (!WriteProcessMemory(Process->second, pAddress, ProcessHiJackLibraryPath.c_str(), (ProcessHiJackLibraryPath.length() + 1) * sizeof(TCHAR), nullptr)) {
+		if (!WriteProcessMemory(Process, pAddress, ProcessHiJackLibraryPath.c_str(), (ProcessHiJackLibraryPath.length() + 1) * sizeof(TCHAR), nullptr)) {
 			_tprintf_s(_T("ERROR: WriteProcessMemory (Error = 0x%08X)\n"), GetLastError());
-			VirtualFreeEx(Process->second, pAddress, 0, MEM_RELEASE);
+			VirtualFreeEx(Process, pAddress, 0, MEM_RELEASE);
 			return;
 		}
 
 #ifdef _UNICODE
 		using fnLoadLibraryW = HMODULE(WINAPI*)(LPCWSTR lpLibFileName);
-		fnLoadLibraryW pLoadLibraryW = reinterpret_cast<fnLoadLibraryW>(GetProcAddress(reinterpret_cast<HMODULE>(ImageBase), "LoadLibraryW"));
+		fnLoadLibraryW pLoadLibraryW = reinterpret_cast<fnLoadLibraryW>(GetProcAddress(reinterpret_cast<HMODULE>(pImageBase), "LoadLibraryW"));
 		if (!pLoadLibraryW) {
 			_tprintf_s(_T("ERROR: GetProcAddress (Error = 0x%08X)\n"), GetLastError());
-			VirtualFreeEx(Process->second, pAddress, 0, MEM_RELEASE);
+			VirtualFreeEx(Process, pAddress, 0, MEM_RELEASE);
 			return;
 		}
 
-		HANDLE hThread = CreateRemoteThread(Process->second, nullptr, 0, reinterpret_cast<LPTHREAD_START_ROUTINE>(pLoadLibraryW), pAddress, 0, nullptr);
+		HANDLE hThread = CreateRemoteThread(Process, nullptr, 0, reinterpret_cast<LPTHREAD_START_ROUTINE>(pLoadLibraryW), pAddress, 0, nullptr);
 		if (!hThread || (hThread == INVALID_HANDLE_VALUE)) {
 			_tprintf_s(_T("ERROR: CreateRemoteThread (Error = 0x%08X)\n"), GetLastError());
-			VirtualFreeEx(Process->second, pAddress, 0, MEM_RELEASE);
+			VirtualFreeEx(Process, pAddress, 0, MEM_RELEASE);
 			return;
 		}
 
-		g_InjectedModules[ProcessId] = std::make_pair(pAddress, hThread);
+		g_InjectedModules[unProcessID] = std::make_pair(pAddress, hThread);
 #else
 		using fnLoadLibraryA = HMODULE(WINAPI*)(LPCSTR lpLibFileName);
-		fnLoadLibraryA pLoadLibraryA = reinterpret_cast<fnLoadLibraryA>(GetProcAddress(reinterpret_cast<HMODULE>(ImageBase), "LoadLibraryA"));
+		fnLoadLibraryA pLoadLibraryA = reinterpret_cast<fnLoadLibraryA>(GetProcAddress(reinterpret_cast<HMODULE>(pImageBase), "LoadLibraryA"));
 		if (!pLoadLibraryA) {
 			_tprintf_s(_T("ERROR: GetProcAddress (Error = 0x%08X)\n"), GetLastError());
-			VirtualFreeEx(Process->second, pAddress, 0, MEM_RELEASE);
+			VirtualFreeEx(Process, pAddress, 0, MEM_RELEASE);
 			return;
 		}
 
-		HANDLE hThread = CreateRemoteThread(Process->second, nullptr, 0, reinterpret_cast<LPTHREAD_START_ROUTINE>(pLoadLibraryA), pAddress, 0, nullptr);
+		HANDLE hThread = CreateRemoteThread(Process, nullptr, 0, reinterpret_cast<LPTHREAD_START_ROUTINE>(pLoadLibraryA), pAddress, 0, nullptr);
 		if (!hThread || (hThread == INVALID_HANDLE_VALUE)) {
 			_tprintf_s(_T("ERROR: CreateRemoteThread (Error = 0x%08X)\n"), GetLastError());
-			VirtualFreeEx(Process->second, pAddress, 0, MEM_RELEASE);
+			VirtualFreeEx(Process, pAddress, 0, MEM_RELEASE);
 			return;
 		}
 
-		g_InjectedModules[ProcessId] = std::make_pair(pAddress, hThread);
+		g_InjectedModules[unProcessID] = std::make_pair(pAddress, hThread);
 #endif
 
 #ifdef _DEBUG
-		_tprintf_s(_T("INJECTED!\n"));
+		_tprintf_s(_T("PRE-INJECTED!\n"));
 #endif // _DEBUG
 	}
 }
 
-void OnUnloadModuleEvent(DWORD ProcessId, LPVOID ImageBase) {
-	auto Process = g_Processes.find(ProcessId);
-	if (Process == g_Processes.end()) {
-		return;
-	}
-
+void OnUnloadModuleEvent(DWORD unProcessID, LPVOID ImageBase) {
 #ifdef _DEBUG
 #ifdef _WIN64
 	_tprintf_s(_T("MODULE UNLOAD: 0x%016llX\n"), reinterpret_cast<size_t>(ImageBase));
@@ -766,12 +829,64 @@ void OnUnloadModuleEvent(DWORD ProcessId, LPVOID ImageBase) {
 #endif // _DEBUG
 }
 
-void OnExceptionEvent(DWORD ProcessId, DWORD ThreadId, const EXCEPTION_DEBUG_INFO& Info, bool bInitialBreakPoint) {
-	auto Process = g_Processes.find(ProcessId);
-	if (Process == g_Processes.end()) {
+void OnDebugStringEvent(DWORD unProcessID, DWORD unThreadID, const OUTPUT_DEBUG_STRING_INFO& Info) {
+	auto Process = GetDebugProcess(unProcessID);
+	if (!Process) {
 		return;
 	}
 
+#ifdef _DEBUG
+	if ((Info.lpDebugStringData == 0) || (Info.nDebugStringLength == 0)) {
+		return;
+	}
+
+	const SIZE_T cMaxChars = 8192; // 8 KiB
+
+	if (Info.fUnicode) {
+		static WCHAR Buffer[cMaxChars + 1] = {};
+		memset(Buffer, 0, sizeof(Buffer));
+
+		SIZE_T CharsToRead = Info.nDebugStringLength;
+
+		if (CharsToRead > cMaxChars) {
+			CharsToRead = cMaxChars;
+		}
+
+		SIZE_T BytesRead = 0;
+
+		if (!ReadProcessMemory(Process, Info.lpDebugStringData, Buffer, CharsToRead * sizeof(WCHAR), &BytesRead) || (BytesRead == 0)) {
+			return;
+		}
+
+		wprintf(L"ODS(%u, %u): %s\n", unProcessID, unThreadID, Buffer);
+	} else {
+		static CHAR Buffer[cMaxChars + 1] = {};
+		memset(Buffer, 0, sizeof(Buffer));
+
+		SIZE_T CharsToRead = Info.nDebugStringLength;
+
+		if (CharsToRead > cMaxChars) {
+			CharsToRead = cMaxChars;
+		}
+
+		SIZE_T BytesRead = 0;
+
+		if (!ReadProcessMemory(Process, Info.lpDebugStringData, Buffer, CharsToRead * sizeof(CHAR), &BytesRead) || (BytesRead == 0)) {
+			return;
+		}
+
+		printf("ODS(%u, %u): %s\n", unProcessID, unThreadID, Buffer);
+	}
+#endif // _DEBUG
+}
+
+void OnRipEvent(DWORD unProcessID, DWORD unThreadID, DWORD Error, DWORD Type) {
+	_tprintf_s(_T("RIP EVENT\n"));
+	_tprintf_s(_T("  ERROR: %lu\n"), Error);
+	_tprintf_s(_T("  TYPE:  %lu\n"), Type);
+}
+
+void OnExceptionEvent(DWORD unProcessID, DWORD unThreadID, const EXCEPTION_DEBUG_INFO& Info, bool bInitialBreakPoint) {
 #ifdef _DEBUG
 	_tprintf_s(_T("EXCEPTION (%s)\n"), Info.dwFirstChance ? _T("first-chance") : _T("second-chance"));
 	_tprintf_s(_T("  CODE:       0x%08X\n"), Info.ExceptionRecord.ExceptionCode);
@@ -780,7 +895,7 @@ void OnExceptionEvent(DWORD ProcessId, DWORD ThreadId, const EXCEPTION_DEBUG_INF
 #else
 	_tprintf_s(_T("  ADDRESS:    0x%08X\n"), reinterpret_cast<size_t>(Info.ExceptionRecord.ExceptionAddress));
 #endif
-	_tprintf_s(_T("  THREAD ID:  %lu\n"), ThreadId);
+	_tprintf_s(_T("  THREAD ID:  %lu\n"), unThreadID);
 	_tprintf_s(_T("  FLAGS:      0x%08X\n"), Info.ExceptionRecord.ExceptionFlags);
 	_tprintf_s(_T("  PARAMETERS: %lu\n"), Info.ExceptionRecord.NumberParameters);
 
@@ -795,66 +910,6 @@ void OnExceptionEvent(DWORD ProcessId, DWORD ThreadId, const EXCEPTION_DEBUG_INF
 #else
 		_tprintf_s(_T("    PARAM[%d]: 0x%08X\n"), i, Info.ExceptionRecord.ExceptionInformation[i]);
 #endif
-	}
-#endif // _DEBUG
-
-	if (bInitialBreakPoint) {
-		g_bContinueDebugging = false;
-	}
-
-	auto InjectedModules = g_InjectedModules.find(ProcessId);
-	if (bInitialBreakPoint && (InjectedModules != g_InjectedModules.end())) {
-#ifdef _DEBUG
-		_tprintf_s(_T("POST-INJECTED!\n"));
-#endif // _DEBUG
-	}
-}
-
-void OnDebugStringEvent(DWORD ProcessId, DWORD ThreadId, const OUTPUT_DEBUG_STRING_INFO& Info) {
-	auto Process = g_Processes.find(ProcessId);
-	if (Process == g_Processes.end()) {
-		return;
-	}
-
-#ifdef _DEBUG
-	if ((Info.lpDebugStringData == 0) || (Info.nDebugStringLength == 0)) {
-		return;
-	}
-
-	const SIZE_T cMaxChars = 8192;
-
-	if (Info.fUnicode) {
-		static WCHAR Buffer[cMaxChars + 1] = {};
-
-		SIZE_T CharsToRead = Info.nDebugStringLength;
-
-		if (CharsToRead > cMaxChars) {
-			CharsToRead = cMaxChars;
-		}
-
-		SIZE_T BytesRead = 0;
-
-		if (!ReadProcessMemory(Process->second, Info.lpDebugStringData, Buffer, CharsToRead * sizeof(WCHAR), &BytesRead) || (BytesRead == 0)) {
-			return;
-		}
-
-		wprintf(L"ODS(%u): %s\n", ThreadId, Buffer);
-	} else {
-		static CHAR Buffer[cMaxChars + 1] = {};
-
-		SIZE_T CharsToRead = Info.nDebugStringLength;
-
-		if (CharsToRead > cMaxChars) {
-			CharsToRead = cMaxChars;
-		}
-
-		SIZE_T BytesRead = 0;
-
-		if (!ReadProcessMemory(Process->second, Info.lpDebugStringData, Buffer, CharsToRead * sizeof(CHAR), &BytesRead) || (BytesRead == 0)) {
-			return;
-		}
-
-		printf("ODS(%u): %s\n", ThreadId, Buffer);
 	}
 #endif // _DEBUG
 }
@@ -880,33 +935,23 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 			switch (DebugEvent.dwDebugEventCode) {
 				case CREATE_PROCESS_DEBUG_EVENT:
 					g_Processes[DebugEvent.dwProcessId] = DebugEvent.u.CreateProcessInfo.hProcess;
-					{
-						if (g_Threads.find(DebugEvent.dwProcessId) == g_Threads.end()) {
-							g_Threads[DebugEvent.dwProcessId] = std::unordered_map<DWORD, HANDLE>();
-						}
-
-						g_Threads[DebugEvent.dwProcessId][DebugEvent.dwThreadId] = DebugEvent.u.CreateProcessInfo.hThread;
-					}
-					{
-						if (g_Modules.find(DebugEvent.dwProcessId) == g_Modules.end()) {
-							g_Modules[DebugEvent.dwProcessId] = std::unordered_map<LPVOID, tstring>();
-						}
-
-						g_Modules[DebugEvent.dwProcessId][DebugEvent.u.LoadDll.lpBaseOfDll] = GetFileNameFromHandle(DebugEvent.u.CreateProcessInfo.hThread);
-					}
+					g_Threads[DebugEvent.dwProcessId][DebugEvent.dwThreadId] = { DebugEvent.u.CreateProcessInfo.hThread, DebugEvent.u.CreateProcessInfo.lpStartAddress };
+					g_Modules[DebugEvent.dwProcessId][DebugEvent.u.CreateProcessInfo.lpBaseOfImage] = GetFilePath(DebugEvent.u.CreateProcessInfo.hFile);
 
 					OnCreateProcessEvent(DebugEvent.dwProcessId);
 					OnCreateThreadEvent(DebugEvent.dwProcessId, DebugEvent.dwThreadId);
-					OnLoadModuleEvent(DebugEvent.dwProcessId, DebugEvent.u.CreateProcessInfo.lpBaseOfImage, DebugEvent.u.CreateProcessInfo.hFile);
+					OnLoadModuleEvent(DebugEvent.dwProcessId, DebugEvent.u.CreateProcessInfo.lpBaseOfImage);
 
 					SafeCloseHandle(DebugEvent.u.CreateProcessInfo.hFile);
 					break;
 
 				case EXIT_PROCESS_DEBUG_EVENT:
-					OnExitProcessEvent(DebugEvent.dwProcessId);
+					OnExitProcessEvent(DebugEvent.dwProcessId, DebugEvent.u.ExitProcess.dwExitCode);
+
 					g_Modules.erase(DebugEvent.dwProcessId);
 					g_Threads.erase(DebugEvent.dwProcessId);
 					g_Processes.erase(DebugEvent.dwProcessId);
+
 					if (g_Processes.empty()) {
 						*pbContinue = false;
 						*pbStopped = true;
@@ -915,60 +960,34 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 					break;
 
 				case CREATE_THREAD_DEBUG_EVENT:
-					{
-						if (g_Threads.find(DebugEvent.dwProcessId) == g_Threads.end()) {
-							g_Threads[DebugEvent.dwProcessId] = std::unordered_map<DWORD, HANDLE>();
-						}
-
-						g_Threads[DebugEvent.dwProcessId][DebugEvent.dwThreadId] = DebugEvent.u.CreateThread.hThread;
-					}
+					g_Threads[DebugEvent.dwProcessId][DebugEvent.dwThreadId] = { DebugEvent.u.CreateThread.hThread, DebugEvent.u.CreateThread.lpStartAddress };
 					OnCreateThreadEvent(DebugEvent.dwProcessId, DebugEvent.dwThreadId);
 					break;
 
 				case EXIT_THREAD_DEBUG_EVENT:
-					OnExitThreadEvent(DebugEvent.dwProcessId, DebugEvent.dwThreadId);
-					{
-						auto Process = g_Threads.find(DebugEvent.dwProcessId);
-						if (Process != g_Threads.end()) {
-							auto& Threads = Process->second;
-							auto Thread = Threads.find(DebugEvent.dwThreadId);
-							if (Thread != Threads.end()) {
-								Threads.erase(Thread);
-								if (Threads.empty()) {
-									g_Threads.erase(Process);
-								}
-							}
-						}
+					OnExitThreadEvent(DebugEvent.dwProcessId, DebugEvent.dwThreadId, DebugEvent.u.ExitThread.dwExitCode);
+
+					g_Threads[DebugEvent.dwProcessId].erase(DebugEvent.dwThreadId);
+					if (g_Threads[DebugEvent.dwProcessId].empty()) {
+						g_Threads.erase(DebugEvent.dwProcessId);
 					}
 
 					break;
 
 				case LOAD_DLL_DEBUG_EVENT:
-					{
-						if (g_Modules.find(DebugEvent.dwProcessId) == g_Modules.end()) {
-							g_Modules[DebugEvent.dwProcessId] = std::unordered_map<LPVOID, tstring>();
-						}
+					g_Modules[DebugEvent.dwProcessId][DebugEvent.u.LoadDll.lpBaseOfDll] = GetFilePath(DebugEvent.u.LoadDll.hFile);
 
-						g_Modules[DebugEvent.dwProcessId][DebugEvent.u.LoadDll.lpBaseOfDll] = GetFileNameFromHandle(DebugEvent.u.CreateThread.hThread);
-					}
-					OnLoadModuleEvent(DebugEvent.dwProcessId, DebugEvent.u.LoadDll.lpBaseOfDll, DebugEvent.u.LoadDll.hFile);
+					OnLoadModuleEvent(DebugEvent.dwProcessId, DebugEvent.u.LoadDll.lpBaseOfDll);
+
 					SafeCloseHandle(DebugEvent.u.LoadDll.hFile);
 					break;
 
 				case UNLOAD_DLL_DEBUG_EVENT:
 					OnUnloadModuleEvent(DebugEvent.dwProcessId, DebugEvent.u.UnloadDll.lpBaseOfDll);
-					{
-						auto Process = g_Modules.find(DebugEvent.dwProcessId);
-						if (Process != g_Modules.end()) {
-							auto& Modules = Process->second;
-							auto Module = Modules.find(DebugEvent.u.LoadDll.lpBaseOfDll);
-							if (Module != Modules.end()) {
-								Modules.erase(Module);
-								if (Modules.empty()) {
-									g_Modules.erase(Process);
-								}
-							}
-						}
+
+					g_Modules[DebugEvent.dwProcessId].erase(DebugEvent.u.UnloadDll.lpBaseOfDll);
+					if (g_Modules[DebugEvent.dwProcessId].empty()) {
+						g_Modules.erase(DebugEvent.dwProcessId);
 					}
 
 					break;
@@ -978,10 +997,12 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 					break;
 
 				case RIP_EVENT:
+					OnRipEvent(DebugEvent.dwProcessId, DebugEvent.dwThreadId, DebugEvent.u.RipInfo.dwError, DebugEvent.u.RipInfo.dwType);
 					break;
 
 				case EXCEPTION_DEBUG_EVENT:
 					OnExceptionEvent(DebugEvent.dwProcessId, DebugEvent.dwThreadId, DebugEvent.u.Exception, !bSeenInitialBreakPoint);
+
 					ContinueStatus = DBG_EXCEPTION_NOT_HANDLED;
 					if (!bSeenInitialBreakPoint && (DebugEvent.u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_BREAKPOINT)) {
 						ContinueStatus = DBG_CONTINUE;
@@ -1294,11 +1315,11 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 		}
 #endif // !_UNICODE
 
-		TCHAR szDrive[_MAX_DRIVE] = {}, szDir[_MAX_DIR] = {}, szName[_MAX_FNAME] = {}, szExt[_MAX_EXT] = {};
+		TCHAR szDrive[_MAX_DRIVE] = {}, szDirectory[_MAX_DIR] = {}, szName[_MAX_FNAME] = {}, szExt[_MAX_EXT] = {};
 #ifdef _UNICODE
-		errno_t err = _tsplitpath_s(szSelfProcessPath, szDrive, _countof(szDrive), szDir, _countof(szDir), szName, _countof(szName), szExt, _countof(szExt));
+		errno_t err = _tsplitpath_s(szSelfProcessPath, szDrive, _countof(szDrive), szDirectory, _countof(szDirectory), szName, _countof(szName), szExt, _countof(szExt));
 #else
-		errno_t err = _tsplitpath_s(as.Buffer, szDrive, _countof(szDrive), szDir, _countof(szDir), szName, _countof(szName), szExt, _countof(szExt));
+		errno_t err = _tsplitpath_s(as.Buffer, szDrive, _countof(szDrive), szDirectory, _countof(szDirectory), szName, _countof(szName), szExt, _countof(szExt));
 #endif
 		if (err != 0) {
 			_tprintf_s(_T("ERROR: _tsplitpath_s (Error = %i)\n"), err);
@@ -1307,7 +1328,7 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 		}
 
 		TCHAR szProcessPath[MAX_PATH] = {};
-		if (_stprintf_s(szProcessPath, _countof(szProcessPath), _T("%s%s%s32%s"), szDrive, szDir, szName, szExt) < 0) {
+		if (_stprintf_s(szProcessPath, _countof(szProcessPath), _T("%s%s%s32%s"), szDrive, szDirectory, szName, szExt) < 0) {
 			_tprintf_s(_T("ERROR: _stprintf_s (Error = 0x%08X)\n"), GetLastError());
 			CloseHandle(hJob);
 			return EXIT_FAILURE;
@@ -1393,11 +1414,11 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 		}
 #endif // !_UNICODE
 
-		TCHAR szDrive[_MAX_DRIVE] = {}, szDir[_MAX_DIR] = {}, szName[_MAX_FNAME] = {}, szExt[_MAX_EXT] = {};
+		TCHAR szDrive[_MAX_DRIVE] = {}, szDirectory[_MAX_DIR] = {}, szName[_MAX_FNAME] = {}, szExt[_MAX_EXT] = {};
 #ifdef _UNICODE
-		errno_t err = _tsplitpath_s(szSelfProcessPath, szDrive, _countof(szDrive), szDir, _countof(szDir), szName, _countof(szName), szExt, _countof(szExt));
+		errno_t err = _tsplitpath_s(szSelfProcessPath, szDrive, _countof(szDrive), szDirectory, _countof(szDirectory), szName, _countof(szName), szExt, _countof(szExt));
 #else
-		errno_t err = _tsplitpath_s(as.Buffer, szDrive, _countof(szDrive), szDir, _countof(szDir), szName, _countof(szName), szExt, _countof(szExt));
+		errno_t err = _tsplitpath_s(as.Buffer, szDrive, _countof(szDrive), szDirectory, _countof(szDirectory), szName, _countof(szName), szExt, _countof(szExt));
 #endif
 		if (err != 0) {
 			_tprintf_s(_T("ERROR: _tsplitpath_s (Error = %i)\n"), err);
@@ -1412,7 +1433,7 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 		}
 
 		TCHAR szProcessPath[MAX_PATH] = {};
-		if (_stprintf_s(szProcessPath, _countof(szProcessPath), _T("%s%s%s%s"), szDrive, szDir, szName, szExt) < 0) {
+		if (_stprintf_s(szProcessPath, _countof(szProcessPath), _T("%s%s%s%s"), szDrive, szDirectory, szName, szExt) < 0) {
 			_tprintf_s(_T("ERROR: _stprintf_s (Error = 0x%08X)\n"), GetLastError());
 			CloseHandle(hJob);
 			return EXIT_FAILURE;
@@ -1480,12 +1501,13 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 
 	tstring CommandLine = _T("");
 	for (int i = 1; i < argc; ++i) {
-		if (i != 1) {
+
+		if ((i == 1) || _tcschr(argv[i], _T(' '))) {
+			CommandLine += _T('"');
 			CommandLine += argv[i];
+			CommandLine += _T('"');
 		} else {
-			CommandLine += _T('"');
 			CommandLine += argv[i];
-			CommandLine += _T('"');
 		}
 
 		if (i + 1 < argc) {
