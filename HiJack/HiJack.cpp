@@ -36,7 +36,7 @@ using tstring_optional = std::pair<bool, tstring>;
 
 // General definitions
 
-#define HIJACK_VERSION "1.1.5"
+#define HIJACK_VERSION "1.3.0"
 
 #define ProcessDebugObjectHandle static_cast<PROCESSINFOCLASS>(0x1E)
 #define ProcessDebugFlags static_cast<PROCESSINFOCLASS>(0x1F)
@@ -49,9 +49,9 @@ EXTERN_C NTSYSCALLAPI NTSTATUS NTAPI NtResumeProcess(HANDLE ProcessHandle);
 EXTERN_C NTSYSCALLAPI NTSTATUS NTAPI NtRemoveProcessDebug(IN HANDLE ProcessHandle, IN HANDLE DebugObjectHandle);
 
 // [{
-//     PID: HANDLE
+//     PID: (HANDLE, START ADDRESS)
 // }]
-std::unordered_map<DWORD, HANDLE> g_Processes;
+std::unordered_map<DWORD, std::pair<HANDLE, LPVOID>> g_Processes;
 
 // [{
 //     PID: [{
@@ -384,9 +384,12 @@ tstring_optional GetProcessHiJackLibraryName(HANDLE hProcess) {
 	return { true, LibraryName };
 }
 
+// ---
+// Loader
+// ---
+
 DECLARE_SECTION(".load")
 DEFINE_SECTION(".load", SECTION_READWRITE)
-
 
 using fnRtlDosPathNameToNtPathName_U = BOOLEAN(NTAPI*)(PCWSTR DosName, PUNICODE_STRING NtName, PCWSTR* DosFilePath, PUNICODE_STRING NtFilePath);
 
@@ -499,7 +502,7 @@ DEFINE_CODE_IN_SECTION(".load") bool MapImage(PLOADER_DATA pLD) {
 		}
 	}
 
-	DWORD unSize = 0;
+	SIZE_T unSize = 0;
 	pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
 	pLD->m_pImageAddress = pDesiredBase;
 
@@ -646,12 +649,9 @@ DEFINE_CODE_IN_SECTION(".load") bool ResolveImports(PLOADER_DATA pLD) {
         return true;
     }
 
-    PIMAGE_IMPORT_DESCRIPTOR pImportDescriptor = reinterpret_cast<PIMAGE_IMPORT_DESCRIPTOR>(
-        reinterpret_cast<char*>(pDH) + ImportDirectory->VirtualAddress);
-
+    PIMAGE_IMPORT_DESCRIPTOR pImportDescriptor = reinterpret_cast<PIMAGE_IMPORT_DESCRIPTOR>(reinterpret_cast<char*>(pDH) + ImportDirectory->VirtualAddress);
     while (pImportDescriptor->Name) {
-        const char* szModuleName = reinterpret_cast<const char*>(
-            reinterpret_cast<char*>(pDH) + pImportDescriptor->Name);
+        const char* szModuleName = reinterpret_cast<const char*>(reinterpret_cast<char*>(pDH) + pImportDescriptor->Name);
 
         ANSI_STRING as = { 0 };
         UNICODE_STRING NTModule = { 0 };
@@ -668,11 +668,8 @@ DEFINE_CODE_IN_SECTION(".load") bool ResolveImports(PLOADER_DATA pLD) {
 
         pLD->m_pRtlFreeUnicodeString(&NTModule);
 
-        PIMAGE_THUNK_DATA pThunk = reinterpret_cast<PIMAGE_THUNK_DATA>(
-            reinterpret_cast<char*>(pDH) + pImportDescriptor->OriginalFirstThunk);
-        PIMAGE_THUNK_DATA pIAT = reinterpret_cast<PIMAGE_THUNK_DATA>(
-            reinterpret_cast<char*>(pDH) + pImportDescriptor->FirstThunk);
-
+        PIMAGE_THUNK_DATA pThunk = reinterpret_cast<PIMAGE_THUNK_DATA>(reinterpret_cast<char*>(pDH) + pImportDescriptor->OriginalFirstThunk);
+        PIMAGE_THUNK_DATA pIAT = reinterpret_cast<PIMAGE_THUNK_DATA>(reinterpret_cast<char*>(pDH) + pImportDescriptor->FirstThunk);
         while (pThunk->u1.AddressOfData) {
             if (pThunk->u1.Ordinal & IMAGE_ORDINAL_FLAG) {
                 ULONG unOrdinal = IMAGE_ORDINAL(pThunk->u1.Ordinal);
@@ -680,21 +677,24 @@ DEFINE_CODE_IN_SECTION(".load") bool ResolveImports(PLOADER_DATA pLD) {
                 if (!NT_SUCCESS(pLD->m_pLdrGetProcedureAddress(hModule, NULL, unOrdinal, &pProcedure))) {
                     return false;
                 }
+
                 pIAT->u1.Function = reinterpret_cast<ULONG_PTR>(pProcedure);
             } else {
-                PIMAGE_IMPORT_BY_NAME NameData = reinterpret_cast<PIMAGE_IMPORT_BY_NAME>(
-                    reinterpret_cast<char*>(pDH) + pThunk->u1.AddressOfData);
+                PIMAGE_IMPORT_BY_NAME NameData = reinterpret_cast<PIMAGE_IMPORT_BY_NAME>(reinterpret_cast<char*>(pDH) + pThunk->u1.AddressOfData);
                 ANSI_STRING as;
                 pLD->m_pRtlInitAnsiString(&as, NameData->Name);
                 PVOID pProcedure = nullptr;
                 if (!NT_SUCCESS(pLD->m_pLdrGetProcedureAddress(hModule, &as, 0, &pProcedure))) {
                     return false;
                 }
+
                 pIAT->u1.Function = reinterpret_cast<ULONG_PTR>(pProcedure);
             }
+
             ++pThunk;
             ++pIAT;
         }
+
         ++pImportDescriptor;
     }
     return true;
@@ -722,8 +722,7 @@ DEFINE_CODE_IN_SECTION(".load") bool ProtectSections(PLOADER_DATA pLD) {
         PVOID pAddress = reinterpret_cast<PVOID>(reinterpret_cast<char*>(pDH) + pFirstSection[i].VirtualAddress);
         SIZE_T unVirtualSize = pFirstSection[i].Misc.VirtualSize;
         ULONG unOldProtect = 0;
-        if (!NT_SUCCESS(pLD->m_pNtProtectVirtualMemory(reinterpret_cast<HANDLE>(-1),
-                      &pAddress, &unVirtualSize, unProtect, &unOldProtect))) {
+        if (!NT_SUCCESS(pLD->m_pNtProtectVirtualMemory(reinterpret_cast<HANDLE>(-1), &pAddress, &unVirtualSize, unProtect, &unOldProtect))) {
             return false;
         }
 
@@ -743,9 +742,7 @@ DEFINE_CODE_IN_SECTION(".load") bool ExecuteTLS(PLOADER_DATA pLD, DWORD unReason
         return true;
     }
 
-    PIMAGE_TLS_DIRECTORY pTLS = reinterpret_cast<PIMAGE_TLS_DIRECTORY>(
-        reinterpret_cast<char*>(pDH) + TLSDirectory->VirtualAddress);
-
+    PIMAGE_TLS_DIRECTORY pTLS = reinterpret_cast<PIMAGE_TLS_DIRECTORY>(reinterpret_cast<char*>(pDH) + TLSDirectory->VirtualAddress);
     PIMAGE_TLS_CALLBACK* pCallBacks = reinterpret_cast<PIMAGE_TLS_CALLBACK*>(pTLS->AddressOfCallBacks);
     if (pCallBacks) {
         while (*pCallBacks) {
@@ -766,7 +763,6 @@ DEFINE_CODE_IN_SECTION(".load") bool CallDllMain(PLOADER_DATA pLD, DWORD unReaso
     }
 
     fnDllMain EntryPoint = reinterpret_cast<fnDllMain>(reinterpret_cast<char*>(pDH) + pNTHs->OptionalHeader.AddressOfEntryPoint);
-
     EntryPoint(reinterpret_cast<HINSTANCE>(pDH), unReason, nullptr);
 
     return true;
@@ -799,7 +795,7 @@ DEFINE_CODE_IN_SECTION(".load") DWORD WINAPI Loader(LPVOID lpParameter) { SELF_I
 		return EXIT_FAILURE;
 	}
 
-	if (!ExecuteTLS(pLD, DLL_PROCESS_ATTACH)) {
+	if (!ExecuteTLS(pLD, DLL_PROCESS_ATTACH)) { // Useless for simple patching dlls
 		return EXIT_FAILURE;
 	}
 
@@ -935,13 +931,17 @@ bool CreateDebugProcess(const TCHAR* szFileName, PTCHAR szCommandLine, HANDLE hJ
 	return true;
 }
 
-HANDLE GetDebugProcess(DWORD unProcessID) {
+HANDLE GetDebugProcess(DWORD unProcessID, LPVOID* ppStartAddress = nullptr) {
 	auto Process = g_Processes.find(unProcessID);
 	if (Process == g_Processes.end()) {
 		return nullptr;
 	}
 
-	return Process->second;
+	if (ppStartAddress) {
+		*ppStartAddress = Process->second.second;
+	}
+
+	return Process->second.first;
 }
 
 HANDLE GetDebugThread(DWORD unProcessID, DWORD unThreadID, LPVOID* ppStartAddress = nullptr) {
@@ -1444,11 +1444,15 @@ void OnLoadModuleEvent(DWORD unProcessID, LPVOID pImageBase) {
 		void* pRemoteLoaderData = reinterpret_cast<void*>(reinterpret_cast<size_t>(pRemoteSection) + unLoaderDataOffset);
 		void* pRemoteLoader = reinterpret_cast<void*>(reinterpret_cast<size_t>(pRemoteSection) + unLoaderOffset);
 
+		// Better hijack main thread and redirect to Loader and then back
+
 		HANDLE hThread = CreateRemoteThread(Process, nullptr, 0, reinterpret_cast<LPTHREAD_START_ROUTINE>(pRemoteLoader), pRemoteLoaderData, 0, nullptr);
 		if (hThread && (hThread != INVALID_HANDLE_VALUE)) {
 #ifdef _DEBUG
 			_tprintf_s(_T("INJECTED!\n"));
 #endif
+
+			g_bContinueDebugging = false;
 
 			CloseHandle(hThread);
 		}
@@ -1570,7 +1574,7 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 
 			switch (DebugEvent.dwDebugEventCode) {
 				case CREATE_PROCESS_DEBUG_EVENT:
-					g_Processes[DebugEvent.dwProcessId] = DebugEvent.u.CreateProcessInfo.hProcess;
+					g_Processes[DebugEvent.dwProcessId] = { DebugEvent.u.CreateProcessInfo.hProcess, DebugEvent.u.CreateProcessInfo.lpStartAddress };
 					g_Threads[DebugEvent.dwProcessId][DebugEvent.dwThreadId] = { DebugEvent.u.CreateProcessInfo.hThread, DebugEvent.u.CreateProcessInfo.lpStartAddress };
 					g_Modules[DebugEvent.dwProcessId][DebugEvent.u.CreateProcessInfo.lpBaseOfImage] = GetFilePath(DebugEvent.u.CreateProcessInfo.hFile);
 					OnCreateProcessEvent(DebugEvent.dwProcessId);
