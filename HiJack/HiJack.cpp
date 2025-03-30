@@ -428,10 +428,20 @@ using fnNtFlushInstructionCache = NTSTATUS(NTAPI*)(HANDLE ProcessHandle, PVOID B
 
 using fnDllMain = BOOL(WINAPI*)(HINSTANCE, DWORD, LPVOID);
 
+using fnNtOpenThread = NTSTATUS(NTAPI*)(PHANDLE ThreadHandle, ACCESS_MASK AccessMask, POBJECT_ATTRIBUTES ObjectAttributes, CLIENT_ID* ClientId);
+using fnNtSuspendThread = NTSTATUS(NTAPI*)(HANDLE ThreadHandle, PULONG PreviousSuspendCount);
+using fnNtResumeThread = NTSTATUS(NTAPI*)(HANDLE ThreadHandle, PULONG SuspendCount);
+
 typedef struct _LOADER_DATA {
 	void* m_pImageAddress;
 
+	DWORD m_unMainThread;
+
 	HMODULE m_hNTDLL;
+
+	fnNtOpenThread m_pNtOpenThread;
+	fnNtSuspendThread m_pNtSuspendThread;
+	fnNtResumeThread m_pNtResumeThread;
 
 	fnRtlDosPathNameToNtPathName_U m_pRtlDosPathNameToNtPathName_U;
 
@@ -779,27 +789,62 @@ DEFINE_CODE_IN_SECTION(".load") DWORD WINAPI Loader(LPVOID lpParameter) { SELF_I
 		return EXIT_FAILURE;
 	}
 
+	HANDLE hMainThread = nullptr;
+
+	CLIENT_ID cid = {};
+	cid.UniqueProcess = nullptr;
+	cid.UniqueThread = reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(pLD->m_unMainThread));
+
+	OBJECT_ATTRIBUTES oa = {};
+	InitializeObjectAttributes(&oa, nullptr, 0, nullptr, nullptr);
+
+	if (!NT_SUCCESS(pLD->m_pNtOpenThread(&hMainThread, THREAD_SUSPEND_RESUME, &oa, &cid))) {
+		return EXIT_FAILURE;
+	}
+
+	ULONG unSuspendCount = 0;
+	if (!NT_SUCCESS(pLD->m_pNtSuspendThread(hMainThread, &unSuspendCount))) {
+		return EXIT_FAILURE;
+	}
+
 	if (!MapImage(pLD)) {
 		return EXIT_FAILURE;
 	}
 
 	if (!FixRelocations(pLD)) {
+		SIZE_T unSize = 0;
+		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
 		return EXIT_FAILURE;
 	}
 
 	if (!ResolveImports(pLD)) {
+		SIZE_T unSize = 0;
+		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
 		return EXIT_FAILURE;
 	}
 	
 	if (!ProtectSections(pLD)) {
+		SIZE_T unSize = 0;
+		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
 		return EXIT_FAILURE;
 	}
 
 	if (!ExecuteTLS(pLD, DLL_PROCESS_ATTACH)) { // Useless for simple patching dlls
+		SIZE_T unSize = 0;
+		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
 		return EXIT_FAILURE;
 	}
 
 	if (!CallDllMain(pLD, DLL_PROCESS_ATTACH)) {
+		SIZE_T unSize = 0;
+		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
+		return EXIT_FAILURE;
+	}
+
+	unSuspendCount = 0;
+	if (!NT_SUCCESS(pLD->m_pNtResumeThread(hMainThread, &unSuspendCount))) {
+		SIZE_T unSize = 0;
+		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
 		return EXIT_FAILURE;
 	}
 
@@ -1165,6 +1210,18 @@ bool FillLoaderData(HANDLE hProcess, PLOADER_DATA pLoaderData) {
 		return false;
 	}
 
+	if (!GetRemoteProcAddress(hProcess, _T("ntdll.dll"), "NtOpenThread", &pLoaderData->m_pNtOpenThread)) {
+		return false;
+	}
+
+	if (!GetRemoteProcAddress(hProcess, _T("ntdll.dll"), "NtSuspendThread", &pLoaderData->m_pNtSuspendThread)) {
+		return false;
+	}
+
+	if (!GetRemoteProcAddress(hProcess, _T("ntdll.dll"), "NtResumeThread", &pLoaderData->m_pNtResumeThread)) {
+		return false;
+	}
+
 	if (!GetRemoteProcAddress(hProcess, _T("ntdll.dll"), "RtlDosPathNameToNtPathName_U", &pLoaderData->m_pRtlDosPathNameToNtPathName_U)) {
 		return false;
 	}
@@ -1260,7 +1317,7 @@ void OnExitThreadEvent(DWORD unProcessID, DWORD unThreadID, DWORD unExitCode) {
 #endif // _DEBUG
 }
 
-void OnLoadModuleEvent(DWORD unProcessID, LPVOID pImageBase) {
+void OnLoadModuleEvent(DWORD unProcessID, DWORD unThreadID, LPVOID pImageBase) {
 	auto Process = GetDebugProcess(unProcessID);
 	if (!Process) {
 		return;
@@ -1297,9 +1354,7 @@ void OnLoadModuleEvent(DWORD unProcessID, LPVOID pImageBase) {
 
 		DWORD dwAttrib = GetFileAttributes(ProcessHiJackLibraryPath.c_str());
 		if (!((dwAttrib != INVALID_FILE_ATTRIBUTES) && !(dwAttrib & FILE_ATTRIBUTE_DIRECTORY))) { // File not exist
-#ifndef HIJACK_DETACH_IF_NO_INJECTABLE
 			g_bContinueDebugging = false;
-#endif
 			return;
 		}
 
@@ -1418,6 +1473,7 @@ void OnLoadModuleEvent(DWORD unProcessID, LPVOID pImageBase) {
 		}
 
 		LoaderData.m_pImageAddress = pImageAddress;
+		LoaderData.m_unMainThread = unThreadID;
 
 		if (!FillLoaderData(Process, &LoaderData)) {
 			VirtualFreeEx(Process, pImageAddress, 0, MEM_RELEASE);
@@ -1459,7 +1515,7 @@ void OnLoadModuleEvent(DWORD unProcessID, LPVOID pImageBase) {
 	}
 }
 
-void OnUnloadModuleEvent(DWORD unProcessID, LPVOID ImageBase) {
+void OnUnloadModuleEvent(DWORD unProcessID, DWORD unThreadID, LPVOID ImageBase) {
 #ifdef _DEBUG
 #ifdef _WIN64
 	_tprintf_s(_T("MODULE UNLOAD: 0x%016llX\n"), reinterpret_cast<size_t>(ImageBase));
@@ -1579,7 +1635,7 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 					g_Modules[DebugEvent.dwProcessId][DebugEvent.u.CreateProcessInfo.lpBaseOfImage] = GetFilePath(DebugEvent.u.CreateProcessInfo.hFile);
 					OnCreateProcessEvent(DebugEvent.dwProcessId);
 					OnCreateThreadEvent(DebugEvent.dwProcessId, DebugEvent.dwThreadId);
-					OnLoadModuleEvent(DebugEvent.dwProcessId, DebugEvent.u.CreateProcessInfo.lpBaseOfImage);
+					OnLoadModuleEvent(DebugEvent.dwProcessId, DebugEvent.dwThreadId, DebugEvent.u.CreateProcessInfo.lpBaseOfImage);
 					SafeCloseHandle(DebugEvent.u.CreateProcessInfo.hFile);
 					break;
 
@@ -1614,12 +1670,12 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 
 				case LOAD_DLL_DEBUG_EVENT:
 					g_Modules[DebugEvent.dwProcessId][DebugEvent.u.LoadDll.lpBaseOfDll] = GetFilePath(DebugEvent.u.LoadDll.hFile);
-					OnLoadModuleEvent(DebugEvent.dwProcessId, DebugEvent.u.LoadDll.lpBaseOfDll);
+					OnLoadModuleEvent(DebugEvent.dwProcessId, DebugEvent.dwThreadId, DebugEvent.u.LoadDll.lpBaseOfDll);
 					SafeCloseHandle(DebugEvent.u.LoadDll.hFile);
 					break;
 
 				case UNLOAD_DLL_DEBUG_EVENT:
-					OnUnloadModuleEvent(DebugEvent.dwProcessId, DebugEvent.u.UnloadDll.lpBaseOfDll);
+					OnUnloadModuleEvent(DebugEvent.dwProcessId, DebugEvent.dwThreadId, DebugEvent.u.UnloadDll.lpBaseOfDll);
 
 					g_Modules[DebugEvent.dwProcessId].erase(DebugEvent.u.UnloadDll.lpBaseOfDll);
 					if (g_Modules[DebugEvent.dwProcessId].empty()) {
