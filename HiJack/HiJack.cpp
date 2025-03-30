@@ -817,12 +817,12 @@ DEFINE_CODE_IN_SECTION(".load") DWORD WINAPI Loader(LPVOID lpParameter) { SELF_I
 		return EXIT_FAILURE;
 	}
 
-	if (!ResolveImports(pLD)) {
+	if (!ResolveImports(pLD)) { // Compile only with /MT, /MTd
 		SIZE_T unSize = 0;
 		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
 		return EXIT_FAILURE;
 	}
-	
+
 	if (!ProtectSections(pLD)) {
 		SIZE_T unSize = 0;
 		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
