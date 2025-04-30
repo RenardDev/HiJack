@@ -420,6 +420,7 @@ using fnRtlUnicodeStringToAnsiString = NTSTATUS(NTAPI*)(PANSI_STRING Destination
 using fnRtlAnsiStringToUnicodeString = NTSTATUS(NTAPI*)(PUNICODE_STRING DestinationString, PCANSI_STRING SourceString, BOOLEAN AllocateDestinationString);
 
 using fnLdrLoadDll = NTSTATUS(NTAPI*)(PWSTR PathToFile, ULONG Flags, PUNICODE_STRING ModuleFileName, PHANDLE ModuleHandle);
+using fnLdrGetDllHandle = NTSTATUS(NTAPI*)(PWORD pwPath, PVOID Unused, PUNICODE_STRING ModuleFileName, PHANDLE pHModule);
 using fnLdrGetProcedureAddress = NTSTATUS(NTAPI*)(PVOID ModuleHandle, PANSI_STRING ProcedureName, ULONG Ordinal, PVOID* ProcedureAddress);
 
 using fnNtProtectVirtualMemory = NTSTATUS(NTAPI*)(HANDLE ProcessHandle, PVOID* BaseAddress, PSIZE_T NumberOfBytesToProtect, ULONG NewAccessProtection, PULONG OldAccessProtection);
@@ -462,6 +463,7 @@ typedef struct _LOADER_DATA {
 	fnNtFlushInstructionCache m_pNtFlushInstructionCache;
 
 	fnLdrLoadDll m_pLdrLoadDll;
+	fnLdrGetDllHandle m_pLdrGetDllHandle;
 	fnLdrGetProcedureAddress m_pLdrGetProcedureAddress;
 } LOADER_DATA, *PLOADER_DATA;
 
@@ -671,7 +673,8 @@ DEFINE_CODE_IN_SECTION(".load") bool ResolveImports(PLOADER_DATA pLD) {
         }
 
         HMODULE hModule = nullptr;
-        if (!NT_SUCCESS(pLD->m_pLdrLoadDll(NULL, 0, &NTModule, reinterpret_cast<PHANDLE>(&hModule)))) {
+        //if (!NT_SUCCESS(pLD->m_pLdrLoadDll(NULL, 0, &NTModule, reinterpret_cast<PHANDLE>(&hModule)))) {
+        if (!NT_SUCCESS(pLD->m_pLdrGetDllHandle(NULL, 0, &NTModule, reinterpret_cast<PHANDLE>(&hModule)))) {
             pLD->m_pRtlFreeUnicodeString(&NTModule);
             return false;
         }
@@ -1286,6 +1289,10 @@ bool FillLoaderData(HANDLE hProcess, PLOADER_DATA pLoaderData) {
 		return false;
 	}
 
+	if (!GetRemoteProcAddress(hProcess, _T("ntdll.dll"), "LdrGetDllHandle", &pLoaderData->m_pLdrGetDllHandle)) {
+		return false;
+	}
+
 	if (!GetRemoteProcAddress(hProcess, _T("ntdll.dll"), "LdrGetProcedureAddress", &pLoaderData->m_pLdrGetProcedureAddress)) {
 		return false;
 	}
@@ -1337,7 +1344,7 @@ void OnLoadModuleEvent(DWORD unProcessID, DWORD unThreadID, LPVOID pImageBase) {
 #endif // _DEBUG
 
 	static bool bInjected = false;
-	if (ModuleFileName.second != _T("ntdll.dll") && GetDebugModuleAddress(unProcessID, _T("ntdll.dll")) && !bInjected) { // Only when ntdll.dll post loaded
+	if (ModuleFileName.second != _T("ntdll.dll") && GetDebugModuleAddress(unProcessID, _T("ntdll.dll")) && GetDebugModuleAddress(unProcessID, _T("kernelbase.dll")) && !bInjected) { // Only when ntdll.dll and kernelbase.dll post loaded
 		bInjected = true;
 
 		auto ProcessDirectory = GetProcessDirectory(Process);
