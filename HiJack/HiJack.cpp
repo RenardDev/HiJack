@@ -36,7 +36,7 @@ using tstring_optional = std::pair<bool, tstring>;
 
 // General definitions
 
-#define HIJACK_VERSION "1.3.0"
+#define HIJACK_VERSION "1.4.0"
 
 #define ProcessDebugObjectHandle static_cast<PROCESSINFOCLASS>(0x1E)
 #define ProcessDebugFlags static_cast<PROCESSINFOCLASS>(0x1F)
