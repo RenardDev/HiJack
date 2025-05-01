@@ -21,3 +21,4 @@ This will enable HiJack to intercept the process creation of `hello.exe` and inj
   - Use the 64-bit version for 64-bit processes.
 * The 32-bit version of HiJack can utilize the 64-bit version if both executables are placed in the same directory.
 * The 64-bit version of HiJack can utilize the 32-bit version if both executables are placed in the same directory.
+* The NTDLL project is a DLL that can be used as an example for injection.
