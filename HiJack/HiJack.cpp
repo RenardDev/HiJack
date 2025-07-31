@@ -811,7 +811,7 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 	DEBUG_EVENT DebugEvent;
 	bool bSeenInitialBreakPoint = false;
 
-	BYTE int3 = 0xCC;
+	const BYTE int3 = 0xCC;
 	unsigned char unBreakPointOriginalByte = 0;
 
 	while (*pbContinue) {
