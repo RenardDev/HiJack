@@ -51,9 +51,9 @@ EXTERN_C NTSYSCALLAPI NTSTATUS NTAPI NtRemoveProcessDebug(IN HANDLE ProcessHandl
 std::unordered_map<DWORD, std::pair<HANDLE, LPVOID>> g_Processes;
 
 // [{
-//     PID: ORIGINAL BYTE
+//     PID: ORIGINAL BYTES
 // }]
-std::unordered_map<DWORD, unsigned char> g_ProcessesOriginalEntryPointByte;
+std::unordered_map<DWORD, std::vector<unsigned char>> g_ProcessesOriginalEntryPointByte;
 
 
 // [{
@@ -811,8 +811,8 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 	DEBUG_EVENT DebugEvent;
 	bool bSeenInitialBreakPoint = false;
 
-	const BYTE int3 = 0xCC;
-	unsigned char unBreakPointOriginalByte = 0;
+	std::vector<unsigned char> vecBreakPointBytes = { 0xCC };
+	std::vector<unsigned char> vecBreakPointOriginalBytes(vecBreakPointBytes.size());
 
 	while (*pbContinue) {
 		if (WaitForDebugEvent(&DebugEvent, unTimeout)) {
@@ -823,20 +823,20 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 
 					// Setting breakpoint for entrypoint
 
-					if (!ReadProcessMemory(DebugEvent.u.CreateProcessInfo.hProcess, DebugEvent.u.CreateProcessInfo.lpStartAddress, &unBreakPointOriginalByte, 1, nullptr)) {
+					if (!ReadProcessMemory(DebugEvent.u.CreateProcessInfo.hProcess, DebugEvent.u.CreateProcessInfo.lpStartAddress, vecBreakPointOriginalBytes.data(), vecBreakPointOriginalBytes.size(), nullptr)) {
 						break;
 					}
 
-					if (!WriteProcessMemory(DebugEvent.u.CreateProcessInfo.hProcess, DebugEvent.u.CreateProcessInfo.lpStartAddress, &int3, 1, nullptr)) {
+					if (!WriteProcessMemory(DebugEvent.u.CreateProcessInfo.hProcess, DebugEvent.u.CreateProcessInfo.lpStartAddress, vecBreakPointBytes.data(), vecBreakPointBytes.size(), nullptr)) {
 						break;
 					}
 
-					FlushInstructionCache(DebugEvent.u.CreateProcessInfo.hProcess, DebugEvent.u.CreateProcessInfo.lpStartAddress, 1);
+					FlushInstructionCache(DebugEvent.u.CreateProcessInfo.hProcess, DebugEvent.u.CreateProcessInfo.lpStartAddress, vecBreakPointBytes.size());
 
 					// Other stuff
 
 					g_Processes[DebugEvent.dwProcessId] = { DebugEvent.u.CreateProcessInfo.hProcess, DebugEvent.u.CreateProcessInfo.lpStartAddress };
-					g_ProcessesOriginalEntryPointByte[DebugEvent.dwProcessId] = unBreakPointOriginalByte;
+					g_ProcessesOriginalEntryPointByte[DebugEvent.dwProcessId] = vecBreakPointOriginalBytes;
 					g_Threads[DebugEvent.dwProcessId][DebugEvent.dwThreadId] = { DebugEvent.u.CreateProcessInfo.hThread, DebugEvent.u.CreateProcessInfo.lpStartAddress };
 					g_Modules[DebugEvent.dwProcessId][DebugEvent.u.CreateProcessInfo.lpBaseOfImage] = GetFilePath(DebugEvent.u.CreateProcessInfo.hFile);
 
@@ -908,11 +908,11 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 					ContinueStatus = DBG_EXCEPTION_NOT_HANDLED;
 
 					if (bSeenInitialBreakPoint && (DebugEvent.u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_BREAKPOINT) && (DebugEvent.u.Exception.ExceptionRecord.ExceptionAddress == g_Processes[DebugEvent.dwProcessId].second) && (g_ProcessesOriginalEntryPointByte.find(DebugEvent.dwProcessId) != g_ProcessesOriginalEntryPointByte.end())) {
-						if (!WriteProcessMemory(g_Processes[DebugEvent.dwProcessId].first, g_Processes[DebugEvent.dwProcessId].second, &g_ProcessesOriginalEntryPointByte[DebugEvent.dwProcessId], 1, nullptr)) {
+						if (!WriteProcessMemory(g_Processes[DebugEvent.dwProcessId].first, g_Processes[DebugEvent.dwProcessId].second, g_ProcessesOriginalEntryPointByte[DebugEvent.dwProcessId].data(), g_ProcessesOriginalEntryPointByte[DebugEvent.dwProcessId].size(), nullptr)) {
 							break;
 						}
 
-						FlushInstructionCache(g_Processes[DebugEvent.dwProcessId].first, g_Processes[DebugEvent.dwProcessId].second, 1);
+						FlushInstructionCache(g_Processes[DebugEvent.dwProcessId].first, g_Processes[DebugEvent.dwProcessId].second, g_ProcessesOriginalEntryPointByte[DebugEvent.dwProcessId].size());
 
 						CONTEXT ctx {};
 						ctx.ContextFlags = CONTEXT_CONTROL;
