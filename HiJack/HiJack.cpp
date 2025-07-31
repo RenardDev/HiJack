@@ -916,14 +916,17 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 
 						CONTEXT ctx {};
 						ctx.ContextFlags = CONTEXT_CONTROL;
-						if (GetThreadContext(g_Threads[DebugEvent.dwProcessId][DebugEvent.dwThreadId].first, &ctx)) {
-#ifdef _WIN64
-							ctx.Rip = reinterpret_cast<DWORD64>(g_Processes[DebugEvent.dwProcessId].second);
-#else
-							ctx.Eip = reinterpret_cast<DWORD>(g_Processes[DebugEvent.dwProcessId].second);
-#endif
-							SetThreadContext(g_Threads[DebugEvent.dwProcessId][DebugEvent.dwThreadId].first, &ctx);
+						if (!GetThreadContext(g_Threads[DebugEvent.dwProcessId][DebugEvent.dwThreadId].first, &ctx)) {
+							break;
 						}
+
+#ifdef _WIN64
+						ctx.Rip = reinterpret_cast<DWORD64>(g_Processes[DebugEvent.dwProcessId].second);
+#else
+						ctx.Eip = reinterpret_cast<DWORD>(g_Processes[DebugEvent.dwProcessId].second);
+#endif
+
+						SetThreadContext(g_Threads[DebugEvent.dwProcessId][DebugEvent.dwThreadId].first, &ctx);
 
 						OnEntryPoint(DebugEvent.dwProcessId, DebugEvent.dwThreadId);
 
