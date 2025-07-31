@@ -23,9 +23,6 @@
 #include <cwctype>
 #include <cctype>
 
-// Detours
-#include "Detours.h"
-
 // Pragmas
 #pragma comment(lib, "ntdll")
 #pragma comment(lib, "psapi")
@@ -36,7 +33,7 @@ using tstring_optional = std::pair<bool, tstring>;
 
 // General definitions
 
-#define HIJACK_VERSION "1.4.0"
+#define HIJACK_VERSION "1.4.3"
 
 #define ProcessDebugObjectHandle static_cast<PROCESSINFOCLASS>(0x1E)
 #define ProcessDebugFlags static_cast<PROCESSINFOCLASS>(0x1F)
@@ -52,6 +49,12 @@ EXTERN_C NTSYSCALLAPI NTSTATUS NTAPI NtRemoveProcessDebug(IN HANDLE ProcessHandl
 //     PID: (HANDLE, START ADDRESS)
 // }]
 std::unordered_map<DWORD, std::pair<HANDLE, LPVOID>> g_Processes;
+
+// [{
+//     PID: ORIGINAL BYTE
+// }]
+std::unordered_map<DWORD, unsigned char> g_ProcessesOriginalEntryPointByte;
+
 
 // [{
 //     PID: [{
@@ -348,42 +351,6 @@ tstring_optional GetFileName(HANDLE hFile) {
 	return { true, FileName };
 }
 
-tstring_optional GetProcessHiJackLibraryName(HANDLE hProcess) {
-	auto ProcessPath = GetProcessPath(hProcess);
-	if (!ProcessPath.first) {
-		return { false, _T("") };
-	}
-
-	TCHAR szName[_MAX_FNAME] {};
-	errno_t err = _tsplitpath_s(ProcessPath.second.c_str(), nullptr, 0, nullptr, 0, szName, _countof(szName), nullptr, 0);
-	if (err != 0) {
-		_tprintf_s(_T("ERROR: _tsplitpath_s (Error = %i)\n"), err);
-		return { false, _T("") };
-	}
-
-	TCHAR szLibraryName[MAX_PATH] {};
-#ifdef _WIN64
-	if (_stprintf_s(szLibraryName, _countof(szLibraryName), _T("%s_hijack.dll"), szName) < 0) {
-#else
-	if (_stprintf_s(szLibraryName, _countof(szLibraryName), _T("%s_hijack32.dll"), szName) < 0) {
-#endif
-		_tprintf_s(_T("ERROR: _stprintf_s (Error = 0x%08X)\n"), GetLastError());
-		return { false, _T("") };
-	}
-
-	tstring LibraryName = szLibraryName;
-
-	std::transform(LibraryName.begin(), LibraryName.end(), LibraryName.begin(), [](TCHAR c) {
-#ifdef _UNICODE
-		return std::towlower(c);
-#else
-		return std::tolower(static_cast<unsigned char>(c));
-#endif
-	});
-
-	return { true, LibraryName };
-}
-
 bool CreateStandardProcess(const TCHAR* szFileName, PTCHAR szCommandLine, PROCESS_INFORMATION& pi) {
 	STARTUPINFO si {};
 	si.cb = sizeof(si);
@@ -425,13 +392,6 @@ bool CreateProcessWithParent(const TCHAR* szFileName, PTCHAR szCommandLine, HAND
 	return true;
 }
 
-void CloseHandles(PROCESS_INFORMATION& pi) {
-	CloseHandle(pi.hThread);
-	CloseHandle(pi.hProcess);
-	pi.hThread = nullptr;
-	pi.hProcess = nullptr;
-}
-
 bool CreateDebugProcess(const TCHAR* szFileName, PTCHAR szCommandLine, HANDLE hJob, PPROCESS_INFORMATION pProcessInfo) {
 	if (!szFileName) {
 		return false;
@@ -454,7 +414,12 @@ bool CreateDebugProcess(const TCHAR* szFileName, PTCHAR szCommandLine, HANDLE hJ
 	}
 
 	auto ProcessName = GetProcessName(hParentProcess);
-	if (hParentProcess && ProcessName.first && (ProcessName.second == _T("explorer.exe"))) {
+	if (ProcessName.second == _T("wininit.exe")) {
+		_tprintf_s(_T("ERROR: Parent process is `wininit.exe`!\n"));
+		return false;
+	}
+
+	if (hParentProcess && ProcessName.first && ((ProcessName.second == _T("services.exe")) || (ProcessName.second == _T("explorer.exe")))) {
 		CloseHandle(hParentProcess);
 		hParentProcess = nullptr;
 	}
@@ -480,20 +445,23 @@ bool CreateDebugProcess(const TCHAR* szFileName, PTCHAR szCommandLine, HANDLE hJ
 		if (!AssignProcessToJobObject(hJob, pi.hProcess)) {
 			_tprintf_s(_T("ERROR: AssignProcessToJobObject (Error = 0x%08X)\n"), GetLastError());
 			TerminateProcess(pi.hProcess, 0);
-			CloseHandles(pi);
+			CloseHandle(pi.hThread);
+			CloseHandle(pi.hProcess);
 			return false;
 		}
 	}
 
 	if (SuspendThread(pi.hThread) != 1) {
 		_tprintf_s(_T("ERROR: SuspendThread (Error = 0x%08X)\n"), GetLastError());
-		CloseHandles(pi);
+		CloseHandle(pi.hThread);
+		CloseHandle(pi.hProcess);
 		return false;
 	}
 
 	if (!NT_SUCCESS(NtResumeProcess(pi.hProcess))) {
 		_tprintf_s(_T("ERROR: NtResumeProcess (Error = 0x%08X)\n"), GetLastError());
-		CloseHandles(pi);
+		CloseHandle(pi.hThread);
+		CloseHandle(pi.hProcess);
 		return false;
 	}
 
@@ -787,11 +755,13 @@ void OnDebugStringEvent(DWORD unProcessID, DWORD unThreadID, const OUTPUT_DEBUG_
 #endif // _DEBUG
 }
 
-void OnRipEvent(DWORD unProcessID, DWORD unThreadID, DWORD unError, DWORD unType) {
+void OnRIPEvent(DWORD unProcessID, DWORD unThreadID, DWORD unError, DWORD unType) {
+#ifdef _DEBUG
 	_tprintf_s(_T("RIPEVENT(%lu, %lu): 0x%08X, 0x%08X\n"), unProcessID, unThreadID, unError, unType);
+#endif // !_DEBUG
 }
 
-void OnExceptionEvent(DWORD unProcessID, DWORD unThreadID, const EXCEPTION_DEBUG_INFO& Info, bool bInitialBreakPoint) {
+void OnExceptionEvent(DWORD unProcessID, DWORD unThreadID, const EXCEPTION_DEBUG_INFO& Info, bool bInitialBreakPoint, bool* pHandledException) {
 #ifdef _DEBUG
 	_tprintf_s(_T("ONEXCEPTION (%s)\n"), Info.dwFirstChance ? _T("First-Chance") : _T("Second-Chance"));
 	_tprintf_s(_T("  CODE:       0x%08X\n"), Info.ExceptionRecord.ExceptionCode);
@@ -819,6 +789,14 @@ void OnExceptionEvent(DWORD unProcessID, DWORD unThreadID, const EXCEPTION_DEBUG
 #endif // _DEBUG
 }
 
+void OnEntryPoint(DWORD unProcessID, DWORD unThreadID) {
+#ifdef _DEBUG
+	_tprintf_s(_T("ONENTRYPOINT(%lu): %lu\n"), unProcessID, unThreadID);
+#endif // !_DEBUG
+
+	g_bContinueDebugging = false; // There is no point in debugging further
+}
+
 void OnTimeout() {
 #ifdef _DEBUG
 	_tprintf_s(_T("ONTIMEOUT!\n"));
@@ -833,13 +811,32 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 	DEBUG_EVENT DebugEvent;
 	bool bSeenInitialBreakPoint = false;
 
+	BYTE int3 = 0xCC;
+	unsigned char unBreakPointOriginalByte = 0;
+
 	while (*pbContinue) {
 		if (WaitForDebugEvent(&DebugEvent, unTimeout)) {
 			DWORD ContinueStatus = DBG_CONTINUE;
 
 			switch (DebugEvent.dwDebugEventCode) {
 				case CREATE_PROCESS_DEBUG_EVENT:
+
+					// Setting breakpoint for entrypoint
+
+					if (!ReadProcessMemory(DebugEvent.u.CreateProcessInfo.hProcess, DebugEvent.u.CreateProcessInfo.lpStartAddress, &unBreakPointOriginalByte, 1, nullptr)) {
+						break;
+					}
+
+					if (!WriteProcessMemory(DebugEvent.u.CreateProcessInfo.hProcess, DebugEvent.u.CreateProcessInfo.lpStartAddress, &int3, 1, nullptr)) {
+						break;
+					}
+
+					FlushInstructionCache(DebugEvent.u.CreateProcessInfo.hProcess, DebugEvent.u.CreateProcessInfo.lpStartAddress, 1);
+
+					// Other stuff
+
 					g_Processes[DebugEvent.dwProcessId] = { DebugEvent.u.CreateProcessInfo.hProcess, DebugEvent.u.CreateProcessInfo.lpStartAddress };
+					g_ProcessesOriginalEntryPointByte[DebugEvent.dwProcessId] = unBreakPointOriginalByte;
 					g_Threads[DebugEvent.dwProcessId][DebugEvent.dwThreadId] = { DebugEvent.u.CreateProcessInfo.hThread, DebugEvent.u.CreateProcessInfo.lpStartAddress };
 					g_Modules[DebugEvent.dwProcessId][DebugEvent.u.CreateProcessInfo.lpBaseOfImage] = GetFilePath(DebugEvent.u.CreateProcessInfo.hFile);
 
@@ -855,6 +852,7 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 
 					g_Modules.erase(DebugEvent.dwProcessId);
 					g_Threads.erase(DebugEvent.dwProcessId);
+					g_ProcessesOriginalEntryPointByte.erase(DebugEvent.dwProcessId);
 					g_Processes.erase(DebugEvent.dwProcessId);
 
 					if (g_Processes.empty()) {
@@ -900,13 +898,42 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 					break;
 
 				case RIP_EVENT:
-					OnRipEvent(DebugEvent.dwProcessId, DebugEvent.dwThreadId, DebugEvent.u.RipInfo.dwError, DebugEvent.u.RipInfo.dwType);
+					OnRIPEvent(DebugEvent.dwProcessId, DebugEvent.dwThreadId, DebugEvent.u.RipInfo.dwError, DebugEvent.u.RipInfo.dwType);
 					break;
 
 				case EXCEPTION_DEBUG_EVENT:
-					OnExceptionEvent(DebugEvent.dwProcessId, DebugEvent.dwThreadId, DebugEvent.u.Exception, !bSeenInitialBreakPoint);
+					bool bHandledException = false;
+					OnExceptionEvent(DebugEvent.dwProcessId, DebugEvent.dwThreadId, DebugEvent.u.Exception, !bSeenInitialBreakPoint, &bHandledException);
 
 					ContinueStatus = DBG_EXCEPTION_NOT_HANDLED;
+
+					if (bSeenInitialBreakPoint && (DebugEvent.u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_BREAKPOINT) && (DebugEvent.u.Exception.ExceptionRecord.ExceptionAddress == g_Processes[DebugEvent.dwProcessId].second) && (g_ProcessesOriginalEntryPointByte.find(DebugEvent.dwProcessId) != g_ProcessesOriginalEntryPointByte.end())) {
+						if (!WriteProcessMemory(g_Processes[DebugEvent.dwProcessId].first, g_Processes[DebugEvent.dwProcessId].second, &g_ProcessesOriginalEntryPointByte[DebugEvent.dwProcessId], 1, nullptr)) {
+							break;
+						}
+
+						FlushInstructionCache(g_Processes[DebugEvent.dwProcessId].first, g_Processes[DebugEvent.dwProcessId].second, 1);
+
+						CONTEXT ctx {};
+						ctx.ContextFlags = CONTEXT_CONTROL;
+						if (GetThreadContext(g_Threads[DebugEvent.dwProcessId][DebugEvent.dwThreadId].first, &ctx)) {
+#ifdef _WIN64
+							ctx.Rip = reinterpret_cast<DWORD64>(g_Processes[DebugEvent.dwProcessId].second);
+#else
+							ctx.Eip = reinterpret_cast<DWORD>(g_Processes[DebugEvent.dwProcessId].second);
+#endif
+							SetThreadContext(g_Threads[DebugEvent.dwProcessId][DebugEvent.dwThreadId].first, &ctx);
+						}
+
+						OnEntryPoint(DebugEvent.dwProcessId, DebugEvent.dwThreadId);
+
+						ContinueStatus = DBG_EXCEPTION_HANDLED;
+					}
+
+					if (bSeenInitialBreakPoint && bHandledException) {
+						ContinueStatus = DBG_EXCEPTION_HANDLED;
+					}
+
 					if (!bSeenInitialBreakPoint && (DebugEvent.u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_BREAKPOINT)) {
 						ContinueStatus = DBG_CONTINUE;
 						bSeenInitialBreakPoint = true;
@@ -937,6 +964,158 @@ void ShowHelp() {
 	_tprintf_s(_T("  /remove <File Name>\n"));
 }
 
+bool HiJackList() {
+	HKEY hKey = nullptr;
+	if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, _T("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options"), 0, KEY_READ, &hKey) != ERROR_SUCCESS) {
+		_tprintf_s(_T("ERROR: RegOpenKeyEx (Error = 0x%08X)\n"), GetLastError());
+		return false;
+	}
+
+	DWORD unIndex = 0;
+	TCHAR szSubKeyName[MAX_PATH] {};
+	DWORD unSubKeyNameSize = MAX_PATH;
+	while (RegEnumKeyEx(hKey, unIndex, szSubKeyName, &unSubKeyNameSize, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS) {
+		HKEY hSubKey = nullptr;
+		if (RegOpenKeyEx(hKey, szSubKeyName, 0, KEY_READ, &hSubKey) == ERROR_SUCCESS) {
+			DWORD unType = 0;
+			TCHAR szDebuggerValue[MAX_PATH] {};
+			DWORD unDebuggerValueSize = sizeof(szDebuggerValue);
+			if ((RegQueryValueEx(hSubKey, _T("Debugger"), nullptr, &unType, reinterpret_cast<LPBYTE>(szDebuggerValue), &unDebuggerValueSize) == ERROR_SUCCESS) && (unType == REG_SZ) && (unDebuggerValueSize > sizeof(TCHAR))) {
+				_tprintf_s(_T("> %s: %s\n"), szSubKeyName, szDebuggerValue);
+			}
+
+			RegCloseKey(hSubKey);
+		}
+
+		++unIndex;
+		unSubKeyNameSize = MAX_PATH;
+	}
+
+	RegCloseKey(hKey);
+	return true;
+}
+
+bool HiJackAdd(const TCHAR* szFileName) {
+	if (!szFileName) {
+		return false;
+	}
+
+	TCHAR szKey[MAX_PATH] {};
+	if (_stprintf_s(szKey, _countof(szKey), _T("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\%s"), szFileName) < 0) {
+		_tprintf_s(_T("ERROR: _stprintf_s (Error = 0x%08X)\n"), GetLastError());
+		return false;
+	}
+
+	HKEY hKey = nullptr;
+	if (RegCreateKeyEx(HKEY_LOCAL_MACHINE, szKey, NULL, nullptr, NULL, KEY_WRITE, NULL, &hKey, NULL) != ERROR_SUCCESS) {
+		_tprintf_s(_T("ERROR: RegCreateKeyEx (Error = 0x%08X)\n"), GetLastError());
+		return false;
+	}
+
+	PWSTR szSelfProcessPath = NtCurrentTeb()->ProcessEnvironmentBlock->ProcessParameters->ImagePathName.Buffer;
+	if (!szSelfProcessPath) {
+		_tprintf_s(_T("ERROR: PEB\n"));
+		return false;
+	}
+
+#ifndef _UNICODE
+	UNICODE_STRING us {};
+	RtlInitUnicodeString(&us, szSelfProcessPath);
+
+	ANSI_STRING as {};
+	NTSTATUS nStatus = RtlUnicodeStringToAnsiString(&as, &us, TRUE);
+	if (!NT_SUCCESS(nStatus)) {
+		_tprintf_s(_T("ERROR: RtlUnicodeStringToAnsiString (Error = 0x%08X)\n"), nStatus);
+		return false;
+	}
+#endif // !_UNICODE
+
+#ifdef _UNICODE
+	if (RegSetValueEx(hKey, _T("Debugger"), 0, REG_SZ, reinterpret_cast<const BYTE*>(szSelfProcessPath), (static_cast<DWORD>(_tcslen(szSelfProcessPath)) + 1) * sizeof(TCHAR)) != ERROR_SUCCESS) {
+#else
+	if (RegSetValueEx(hKey, _T("Debugger"), 0, REG_SZ, reinterpret_cast<const BYTE*>(as.Buffer), as.Length + 1) != ERROR_SUCCESS) {
+#endif
+		_tprintf_s(_T("ERROR: RegSetValueEx (Error = 0x%08X)\n"), GetLastError());
+		RegCloseKey(hKey);
+		return false;
+	}
+
+	RegCloseKey(hKey);
+	return true;
+}
+
+bool HiJackRemove(const TCHAR* szFileName) {
+	if (!szFileName) {
+		return false;
+	}
+
+	TCHAR szKey[MAX_PATH] {};
+	if (_stprintf_s(szKey, _countof(szKey), _T("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\%s"), szFileName) < 0) {
+		_tprintf_s(_T("ERROR: _stprintf_s (Error = 0x%08X)\n"), GetLastError());
+		return false;
+	}
+
+	HKEY hKey = nullptr;
+	if (RegCreateKeyEx(HKEY_LOCAL_MACHINE, szKey, NULL, nullptr, NULL, KEY_WRITE, NULL, &hKey, NULL) != ERROR_SUCCESS) {
+		_tprintf_s(_T("ERROR: RegCreateKeyEx (Error = 0x%08X)\n"), GetLastError());
+		return false;
+	}
+
+	RegDeleteValue(hKey, _T("Debugger"));
+	RegCloseKey(hKey);
+
+	hKey = nullptr;
+	if (RegCreateKeyEx(HKEY_LOCAL_MACHINE, szKey, NULL, nullptr, NULL, KEY_READ, NULL, &hKey, NULL) != ERROR_SUCCESS) {
+		_tprintf_s(_T("ERROR: RegCreateKeyEx (Error = 0x%08X)\n"), GetLastError());
+		return false;
+	}
+
+	DWORD unValuesCount = 0;
+	if (RegQueryInfoKey(hKey, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &unValuesCount, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) {
+		_tprintf_s(_T("ERROR: RegQueryInfoKey (Error = 0x%08X)\n"), GetLastError());
+		RegCloseKey(hKey);
+		return false;
+	}
+
+	RegCloseKey(hKey);
+
+	if (!unValuesCount) {
+		if (RegDeleteKey(HKEY_LOCAL_MACHINE, szKey) != ERROR_SUCCESS) {
+			_tprintf_s(_T("WARNING: RegDeleteKey (Error = 0x%08X)\n"), GetLastError());
+		}
+	}
+
+	return true;
+}
+
+bool FindExecutablePath(const TCHAR* szFileName, LPTSTR pResultPath, DWORD dwBufferSize) {
+	if (!szFileName || !pResultPath || !dwBufferSize) {
+		return false;
+	}
+
+	memset(pResultPath, 0, dwBufferSize * sizeof(TCHAR));
+
+	DWORD unPathLength = SearchPath(nullptr, szFileName, nullptr, dwBufferSize, pResultPath, nullptr);
+	if (!((unPathLength > 0) && (unPathLength < dwBufferSize))) {
+		TCHAR szExecutableName[MAX_PATH] {};
+
+		if (_stprintf_s(szExecutableName, _countof(szExecutableName), _T("%s.exe"), szFileName) < 0) {
+			_tprintf_s(_T("ERROR: _stprintf_s (Error = 0x%08X)\n"), GetLastError());
+			return false;
+		}
+
+		memset(pResultPath, 0, dwBufferSize * sizeof(TCHAR));
+
+		unPathLength = SearchPath(nullptr, szExecutableName, nullptr, dwBufferSize, pResultPath, nullptr);
+		if (!((unPathLength > 0) && (unPathLength < dwBufferSize))) {
+			_tprintf_s(_T("ERROR: Unable to locate executable '%s' (Error = 0x%08X)\n"), szFileName, GetLastError());
+			return false;
+		}
+	}
+
+	return true;
+}
+
 int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 #ifdef _DEBUG
 #ifdef _WIN64
@@ -960,33 +1139,10 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 #endif
 #endif // !_DEBUG
 
-		HKEY hKey = nullptr;
-		if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, _T("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options"), 0, KEY_READ, &hKey) != ERROR_SUCCESS) {
-			_tprintf_s(_T("ERROR: RegOpenKeyEx (Error = 0x%08X)\n"), GetLastError());
+		if (!HiJackList()) {
 			return EXIT_FAILURE;
 		}
 
-		DWORD unIndex = 0;
-		TCHAR szSubKeyName[MAX_PATH] {};
-		DWORD unSubKeyNameSize = MAX_PATH;
-		while (RegEnumKeyEx(hKey, unIndex, szSubKeyName, &unSubKeyNameSize, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS) {
-			HKEY hSubKey = nullptr;
-			if (RegOpenKeyEx(hKey, szSubKeyName, 0, KEY_READ, &hSubKey) == ERROR_SUCCESS) {
-				DWORD unType = 0;
-				TCHAR szDebuggerValue[MAX_PATH] {};
-				DWORD unDebuggerValueSize = sizeof(szDebuggerValue);
-				if ((RegQueryValueEx(hSubKey, _T("Debugger"), nullptr, &unType, reinterpret_cast<LPBYTE>(szDebuggerValue), &unDebuggerValueSize) == ERROR_SUCCESS) && (unType == REG_SZ) && (unDebuggerValueSize > sizeof(TCHAR))) {
-					_tprintf_s(_T("> %s: %s\n"), szSubKeyName, szDebuggerValue);
-				}
-
-				RegCloseKey(hSubKey);
-			}
-
-			++unIndex;
-			unSubKeyNameSize = MAX_PATH;
-		}
-
-		RegCloseKey(hKey);
 		return EXIT_SUCCESS;
 	}
 
@@ -1013,47 +1169,9 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 			return EXIT_SUCCESS;
 		}
 
-		TCHAR szKey[MAX_PATH] {};
-		if (_stprintf_s(szKey, _countof(szKey), _T("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\%s"), argv[2]) < 0) {
-			_tprintf_s(_T("ERROR: _stprintf_s (Error = 0x%08X)\n"), GetLastError());
+		if (!HiJackAdd(argv[2])) {
 			return EXIT_FAILURE;
 		}
-
-		HKEY hKey = nullptr;
-		if (RegCreateKeyEx(HKEY_LOCAL_MACHINE, szKey, NULL, nullptr, NULL, KEY_WRITE, NULL, &hKey, NULL) != ERROR_SUCCESS) {
-			_tprintf_s(_T("ERROR: RegCreateKeyEx (Error = 0x%08X)\n"), GetLastError());
-			return EXIT_FAILURE;
-		}
-
-		PWSTR szSelfProcessPath = NtCurrentTeb()->ProcessEnvironmentBlock->ProcessParameters->ImagePathName.Buffer;
-		if (!szSelfProcessPath) {
-			_tprintf_s(_T("ERROR: PEB\n"));
-			return EXIT_FAILURE;
-		}
-
-#ifndef _UNICODE
-		UNICODE_STRING us {};
-		RtlInitUnicodeString(&us, szSelfProcessPath);
-
-		ANSI_STRING as {};
-		NTSTATUS nStatus = RtlUnicodeStringToAnsiString(&as, &us, TRUE);
-		if (!NT_SUCCESS(nStatus)) {
-			_tprintf_s(_T("ERROR: RtlUnicodeStringToAnsiString (Error = 0x%08X)\n"), nStatus);
-			return EXIT_FAILURE;
-		}
-#endif // !_UNICODE
-
-#ifdef _UNICODE
-		if (RegSetValueEx(hKey, _T("Debugger"), 0, REG_SZ, reinterpret_cast<const BYTE*>(szSelfProcessPath), (static_cast<DWORD>(_tcslen(szSelfProcessPath)) + 1) * sizeof(TCHAR)) != ERROR_SUCCESS) {
-#else
-		if (RegSetValueEx(hKey, _T("Debugger"), 0, REG_SZ, reinterpret_cast<const BYTE*>(as.Buffer), as.Length + 1) != ERROR_SUCCESS) {
-#endif
-			_tprintf_s(_T("ERROR: RegSetValueEx (Error = 0x%08X)\n"), GetLastError());
-			RegCloseKey(hKey);
-			return EXIT_FAILURE;
-		}
-
-		RegCloseKey(hKey);
 
 		_tprintf_s(_T("SUCCESS!\n"));
 		return EXIT_SUCCESS;
@@ -1082,84 +1200,22 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 			return EXIT_SUCCESS;
 		}
 
-		TCHAR szKey[MAX_PATH] {};
-		if (_stprintf_s(szKey, _countof(szKey), _T("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\%s"), argv[2]) < 0) {
-			_tprintf_s(_T("ERROR: _stprintf_s (Error = 0x%08X)\n"), GetLastError());
+		if (!HiJackRemove(argv[2])) {
 			return EXIT_FAILURE;
-		}
-
-		HKEY hKey = nullptr;
-		if (RegCreateKeyEx(HKEY_LOCAL_MACHINE, szKey, NULL, nullptr, NULL, KEY_WRITE, NULL, &hKey, NULL) != ERROR_SUCCESS) {
-			_tprintf_s(_T("ERROR: RegCreateKeyEx (Error = 0x%08X)\n"), GetLastError());
-			return EXIT_FAILURE;
-		}
-
-		RegDeleteValue(hKey, _T("Debugger"));
-		RegCloseKey(hKey);
-
-		hKey = nullptr;
-		if (RegCreateKeyEx(HKEY_LOCAL_MACHINE, szKey, NULL, nullptr, NULL, KEY_READ, NULL, &hKey, NULL) != ERROR_SUCCESS) {
-			_tprintf_s(_T("ERROR: RegCreateKeyEx (Error = 0x%08X)\n"), GetLastError());
-			return EXIT_FAILURE;
-		}
-
-		DWORD unValuesCount = 0;
-		if (RegQueryInfoKey(hKey, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &unValuesCount, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) {
-			_tprintf_s(_T("ERROR: RegQueryInfoKey (Error = 0x%08X)\n"), GetLastError());
-			RegCloseKey(hKey);
-			return EXIT_SUCCESS;
-		}
-
-		RegCloseKey(hKey);
-
-		if (!unValuesCount) {
-			if (RegDeleteKey(HKEY_LOCAL_MACHINE, szKey) != ERROR_SUCCESS) {
-				_tprintf_s(_T("WARNING: RegDeleteKey (Error = 0x%08X)\n"), GetLastError());
-			}
 		}
 
 		_tprintf_s(_T("SUCCESS!\n"));
 		return EXIT_SUCCESS;
 	}
 
-	HANDLE hJob = CreateJobObject(nullptr, nullptr);
-	if (!hJob || (hJob == INVALID_HANDLE_VALUE)) {
-		_tprintf_s(_T("ERROR: CreateJobObject (Error = 0x%08X)\n"), GetLastError());
-		return EXIT_FAILURE;
-	}
-
-	JOBOBJECT_EXTENDED_LIMIT_INFORMATION joli {};
-	joli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-	if (!SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, &joli, sizeof(joli))) {
-		_tprintf_s(_T("ERROR: SetInformationJobObject (Error = 0x%08X)\n"), GetLastError());
-		CloseHandle(hJob);
-		return EXIT_FAILURE;
-	}
-
 	TCHAR szResultPath[MAX_PATH] {};
-	DWORD unPathLength = SearchPath(nullptr, argv[1], nullptr, MAX_PATH, szResultPath, nullptr);
-	if (!((unPathLength > 0) && (unPathLength < MAX_PATH))) {
-		TCHAR szExecutableName[MAX_PATH] {};
-		if (_stprintf_s(szExecutableName, _countof(szExecutableName), _T("%s.exe"), argv[1]) < 0) {
-			_tprintf_s(_T("ERROR: _stprintf_s (Error = 0x%08X)\n"), GetLastError());
-			CloseHandle(hJob);
-			return EXIT_FAILURE;
-		}
-
-		memset(szResultPath, 0, sizeof(szResultPath));
-
-		unPathLength = SearchPath(nullptr, szExecutableName, nullptr, MAX_PATH, szResultPath, nullptr);
-		if (!((unPathLength > 0) && (unPathLength < MAX_PATH))) {
-			_tprintf_s(_T("ERROR: CreateFile (Error = 0x%08X)\n"), GetLastError());
-			CloseHandle(hJob);
-			return EXIT_FAILURE;
-		}
+	if (!FindExecutablePath(argv[1], szResultPath, MAX_PATH)) {
+		return EXIT_FAILURE;
 	}
 
 	HANDLE hFile = CreateFile(szResultPath, GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
 	if (!hFile || (hFile == INVALID_HANDLE_VALUE)) {
 		_tprintf_s(_T("ERROR: CreateFile (Error = 0x%08X)\n"), GetLastError());
-		CloseHandle(hJob);
 		return EXIT_FAILURE;
 	}
 
@@ -1167,7 +1223,6 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 	if (!hMapFile || (hMapFile == INVALID_HANDLE_VALUE)) {
 		_tprintf_s(_T("ERROR: CreateFileMapping (Error = 0x%08X)\n"), GetLastError());
 		CloseHandle(hFile);
-		CloseHandle(hJob);
 		return EXIT_FAILURE;
 	}
 
@@ -1176,7 +1231,6 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 		_tprintf_s(_T("ERROR: MapViewOfFile (Error = 0x%08X)\n"), GetLastError());
 		CloseHandle(hMapFile);
 		CloseHandle(hFile);
-		CloseHandle(hJob);
 		return EXIT_FAILURE;
 	}
 
@@ -1187,6 +1241,19 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 		UnmapViewOfFile(pMap);
 		CloseHandle(hMapFile);
 		CloseHandle(hFile);
+		return EXIT_FAILURE;
+	}
+
+	HANDLE hJob = CreateJobObject(nullptr, nullptr);
+	if (!hJob || (hJob == INVALID_HANDLE_VALUE)) {
+		_tprintf_s(_T("ERROR: CreateJobObject (Error = 0x%08X)\n"), GetLastError());
+		return EXIT_FAILURE;
+	}
+
+	JOBOBJECT_EXTENDED_LIMIT_INFORMATION joli{};
+	joli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+	if (!SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, &joli, sizeof(joli))) {
+		_tprintf_s(_T("ERROR: SetInformationJobObject (Error = 0x%08X)\n"), GetLastError());
 		CloseHandle(hJob);
 		return EXIT_FAILURE;
 	}
@@ -1257,7 +1324,9 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 			if (!AssignProcessToJobObject(hJob, pi.hProcess)) {
 				_tprintf_s(_T("ERROR: AssignProcessToJobObject (Error = 0x%08X)\n"), GetLastError());
 				TerminateProcess(pi.hProcess, 0);
-				CloseHandles(pi);
+				CloseHandle(pi.hThread);
+				CloseHandle(pi.hProcess);
+				CloseHandle(hJob);
 				return EXIT_FAILURE;
 			}
 		}
@@ -1265,7 +1334,8 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 		if (WaitForSingleObject(pi.hProcess, INFINITE) != WAIT_OBJECT_0) {
 			_tprintf_s(_T("ERROR: WaitForSingleObject (Error = 0x%08X)\n"), GetLastError());
 			TerminateProcess(pi.hProcess, EXIT_FAILURE);
-			CloseHandles(pi);
+			CloseHandle(pi.hThread);
+			CloseHandle(pi.hProcess);
 			CloseHandle(hJob);
 			return EXIT_FAILURE;
 		}
@@ -1273,7 +1343,8 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 		DWORD unExitCode = EXIT_FAILURE;
 		if (!GetExitCodeProcess(pi.hProcess, &unExitCode)) {
 			_tprintf_s(_T("ERROR: GetExitCodeProcess (Error = 0x%08X)\n"), GetLastError());
-			CloseHandles(pi);
+			CloseHandle(pi.hThread);
+			CloseHandle(pi.hProcess);
 			CloseHandle(hJob);
 			return EXIT_FAILURE;
 		}
@@ -1371,7 +1442,9 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 			if (!AssignProcessToJobObject(hJob, pi.hProcess)) {
 				_tprintf_s(_T("ERROR: AssignProcessToJobObject (Error = 0x%08X)\n"), GetLastError());
 				TerminateProcess(pi.hProcess, 0);
-				CloseHandles(pi);
+				CloseHandle(pi.hThread);
+				CloseHandle(pi.hProcess);
+				CloseHandle(hJob);
 				return EXIT_FAILURE;
 			}
 		}
@@ -1379,7 +1452,8 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 		if (WaitForSingleObject(pi.hProcess, INFINITE) != WAIT_OBJECT_0) {
 			_tprintf_s(_T("ERROR: WaitForSingleObject (Error = 0x%08X)\n"), GetLastError());
 			TerminateProcess(pi.hProcess, EXIT_FAILURE);
-			CloseHandles(pi);
+			CloseHandle(pi.hThread);
+			CloseHandle(pi.hProcess);
 			CloseHandle(hJob);
 			return EXIT_FAILURE;
 		}
@@ -1387,7 +1461,8 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 		DWORD unExitCode = EXIT_FAILURE;
 		if (!GetExitCodeProcess(pi.hProcess, &unExitCode)) {
 			_tprintf_s(_T("ERROR: GetExitCodeProcess (Error = 0x%08X)\n"), GetLastError());
-			CloseHandles(pi);
+			CloseHandle(pi.hThread);
+			CloseHandle(pi.hProcess);
 			CloseHandle(hJob);
 			return EXIT_FAILURE;
 		}
@@ -1459,7 +1534,8 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 	if (ResumeThread(pi.hThread) != 1) {
 		_tprintf_s(_T("ERROR: ResumeThread (Error = 0x%08X)\n"), GetLastError());
 		TerminateProcess(pi.hProcess, EXIT_FAILURE);
-		CloseHandles(pi);
+		CloseHandle(pi.hThread);
+		CloseHandle(pi.hProcess);
 		CloseHandle(hJob);
 		return EXIT_FAILURE;
 	}
@@ -1467,13 +1543,15 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 	bool bStopped = false;
 	if (!DebugProcess(INFINITE, &g_bContinueDebugging, &bStopped)) {
 		TerminateProcess(pi.hProcess, EXIT_FAILURE);
-		CloseHandles(pi);
+		CloseHandle(pi.hThread);
+		CloseHandle(pi.hProcess);
 		CloseHandle(hJob);
 		return EXIT_FAILURE;
 	}
 
 	if (bStopped) {
-		CloseHandles(pi);
+		CloseHandle(pi.hThread);
+		CloseHandle(pi.hProcess);
 		CloseHandle(hJob);
 		return EXIT_FAILURE;
 	}
@@ -1481,7 +1559,8 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 	if (SuspendThread(pi.hThread) != 0) {
 		_tprintf_s(_T("ERROR: SuspendThread (Error = 0x%08X)\n"), GetLastError());
 		TerminateProcess(pi.hProcess, EXIT_FAILURE);
-		CloseHandles(pi);
+		CloseHandle(pi.hThread);
+		CloseHandle(pi.hProcess);
 		CloseHandle(hJob);
 		return EXIT_FAILURE;
 	}
@@ -1491,7 +1570,8 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 	if (!NT_SUCCESS(nStatus)) {
 		_tprintf_s(_T("ERROR: NtQueryInformationProcess (Error = 0x%08X)\n"), nStatus);
 		TerminateProcess(pi.hProcess, EXIT_FAILURE);
-		CloseHandles(pi);
+		CloseHandle(pi.hThread);
+		CloseHandle(pi.hProcess);
 		CloseHandle(hJob);
 		return EXIT_FAILURE;
 	}
@@ -1502,7 +1582,8 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 	if (!NT_SUCCESS(nStatus)) {
 		_tprintf_s(_T("ERROR: NtSetInformationProcess (Error = 0x%08X)\n"), nStatus);
 		TerminateProcess(pi.hProcess, EXIT_FAILURE);
-		CloseHandles(pi);
+		CloseHandle(pi.hThread);
+		CloseHandle(pi.hProcess);
 		CloseHandle(hJob);
 		return EXIT_FAILURE;
 	}
@@ -1512,7 +1593,8 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 	if (!NT_SUCCESS(nStatus)) {
 		_tprintf_s(_T("ERROR: NtQueryInformationProcess (Error = 0x%08X)\n"), GetLastError());
 		TerminateProcess(pi.hProcess, EXIT_FAILURE);
-		CloseHandles(pi);
+		CloseHandle(pi.hThread);
+		CloseHandle(pi.hProcess);
 		CloseHandle(hJob);
 		return EXIT_FAILURE;
 	}
@@ -1521,7 +1603,8 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 	if (!NT_SUCCESS(nStatus)) {
 		_tprintf_s(_T("ERROR: NtRemoveProcessDebug (Error = 0x%08X)\n"), GetLastError());
 		TerminateProcess(pi.hProcess, EXIT_FAILURE);
-		CloseHandles(pi);
+		CloseHandle(pi.hThread);
+		CloseHandle(pi.hProcess);
 		CloseHandle(hJob);
 		return EXIT_FAILURE;
 	}
@@ -1530,7 +1613,8 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 
 	if (!EnableDebugPrivilege(GetCurrentProcess(), false)) {
 		TerminateProcess(pi.hProcess, EXIT_FAILURE);
-		CloseHandles(pi);
+		CloseHandle(pi.hThread);
+		CloseHandle(pi.hProcess);
 		CloseHandle(hJob);
 		return EXIT_FAILURE;
 	}
@@ -1538,15 +1622,18 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 	if (ResumeThread(pi.hThread) != 1) {
 		_tprintf_s(_T("ERROR: ResumeThread (Error = 0x%08X)\n"), GetLastError());
 		TerminateProcess(pi.hProcess, EXIT_FAILURE);
-		CloseHandles(pi);
+		CloseHandle(pi.hThread);
+		CloseHandle(pi.hProcess);
 		CloseHandle(hJob);
 		return EXIT_FAILURE;
 	}
 
 	if (WaitForSingleObject(pi.hProcess, INFINITE) != WAIT_OBJECT_0) {
 		_tprintf_s(_T("ERROR: WaitForSingleObject (Error = 0x%08X)\n"), GetLastError());
+		TerminateThread(pi.hThread, EXIT_FAILURE);
 		TerminateProcess(pi.hProcess, EXIT_FAILURE);
-		CloseHandles(pi);
+		CloseHandle(pi.hThread);
+		CloseHandle(pi.hProcess);
 		CloseHandle(hJob);
 		return EXIT_FAILURE;
 	}
@@ -1554,7 +1641,8 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 	DWORD unExitCode = EXIT_FAILURE;
 	if (!GetExitCodeProcess(pi.hProcess, &unExitCode)) {
 		_tprintf_s(_T("ERROR: GetExitCodeProcess (Error = 0x%08X)\n"), GetLastError());
-		CloseHandles(pi);
+		CloseHandle(pi.hThread);
+		CloseHandle(pi.hProcess);
 		CloseHandle(hJob);
 		return EXIT_FAILURE;
 	}
