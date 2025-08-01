@@ -57,7 +57,6 @@ using fnDllMain = BOOL(WINAPI*)(HINSTANCE, DWORD, LPVOID);
 typedef struct _LOADER_DATA {
 	HMODULE m_hNTDLL;
 	void* m_pImageAddress;
-	DWORD m_unMainThread;
 	fnRtlDosPathNameToNtPathName_U m_pRtlDosPathNameToNtPathName_U;
 	fnRtlFreeUnicodeString m_pRtlFreeUnicodeString;
 	fnRtlFreeAnsiString m_pRtlFreeAnsiString;
@@ -1238,25 +1237,6 @@ DEFINE_CODE_IN_SECTION(".load") DWORD WINAPI Loader(LPVOID lpParameter) { SELF_I
 		return EXIT_FAILURE;
 	}
 
-	CLIENT_ID cid {};
-	cid.UniqueProcess = nullptr;
-	cid.UniqueThread = reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(pLD->m_unMainThread));
-
-	OBJECT_ATTRIBUTES oa {};
-	InitializeObjectAttributes(&oa, nullptr, 0, nullptr, nullptr);
-
-	//HANDLE hMainThread = nullptr;
-	//if (!NT_SUCCESS(pLD->m_pNtOpenThread(&hMainThread, THREAD_SUSPEND_RESUME, &oa, &cid))) {
-	//	return EXIT_FAILURE;
-	//}
-
-	//DWORD unSuspendCount = 0;
-	//if (!NT_SUCCESS(pLD->m_pNtResumeThread(hMainThread, &unSuspendCount))) {
-	//	SIZE_T unSize = 0;
-	//	pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
-	//	return EXIT_FAILURE;
-	//}
-
 	return EXIT_SUCCESS;
 }
 
@@ -1573,7 +1553,6 @@ void OnEntryPoint(DWORD unProcessID, DWORD unThreadID) {
 	}
 
 	LoaderData.m_pImageAddress = pImageAddress;
-	LoaderData.m_unMainThread = unThreadID;
 
 	if (!FillLoaderData(Process, &LoaderData)) {
 		VirtualFreeEx(Process, pImageAddress, 0, MEM_RELEASE);
