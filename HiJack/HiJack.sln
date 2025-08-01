@@ -5,6 +5,8 @@ VisualStudioVersion = 17.11.35327.3
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "HiJack", "HiJack.vcxproj", "{A479DC82-EEBD-4A62-A870-493A379C103B}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "NTDLL", "..\NTDLL\NTDLL.vcxproj", "{E745E8B8-5EEC-4517-BEBC-0E1B0F877971}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -21,6 +23,14 @@ Global
 		{A479DC82-EEBD-4A62-A870-493A379C103B}.Release|x64.Build.0 = Release|x64
 		{A479DC82-EEBD-4A62-A870-493A379C103B}.Release|x86.ActiveCfg = Release|Win32
 		{A479DC82-EEBD-4A62-A870-493A379C103B}.Release|x86.Build.0 = Release|Win32
+		{E745E8B8-5EEC-4517-BEBC-0E1B0F877971}.Debug|x64.ActiveCfg = Release|Win32
+		{E745E8B8-5EEC-4517-BEBC-0E1B0F877971}.Debug|x64.Build.0 = Release|Win32
+		{E745E8B8-5EEC-4517-BEBC-0E1B0F877971}.Debug|x86.ActiveCfg = Release|Win32
+		{E745E8B8-5EEC-4517-BEBC-0E1B0F877971}.Debug|x86.Build.0 = Release|Win32
+		{E745E8B8-5EEC-4517-BEBC-0E1B0F877971}.Release|x64.ActiveCfg = Release|x64
+		{E745E8B8-5EEC-4517-BEBC-0E1B0F877971}.Release|x64.Build.0 = Release|x64
+		{E745E8B8-5EEC-4517-BEBC-0E1B0F877971}.Release|x86.ActiveCfg = Release|Win32
+		{E745E8B8-5EEC-4517-BEBC-0E1B0F877971}.Release|x86.Build.0 = Release|Win32
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

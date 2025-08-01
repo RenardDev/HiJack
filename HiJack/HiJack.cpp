@@ -23,17 +23,68 @@
 #include <cwctype>
 #include <cctype>
 
-// Pragmas
-#pragma comment(lib, "ntdll")
-#pragma comment(lib, "psapi")
+// Detours
+#include "Detours.h"
 
 // Types
 using tstring = std::basic_string<TCHAR, std::char_traits<TCHAR>, std::allocator<TCHAR>>;
 using tstring_optional = std::pair<bool, tstring>;
 
+using fnRtlDosPathNameToNtPathName_U = BOOLEAN(NTAPI*)(PCWSTR DosName, PUNICODE_STRING NtName, PCWSTR* DosFilePath, PUNICODE_STRING NtFilePath);
+using fnRtlFreeUnicodeString = void(NTAPI*)(PUNICODE_STRING UnicodeString);
+using fnRtlFreeAnsiString = void(NTAPI*)(PANSI_STRING AnsiString);
+using fnNtCreateFile = NTSTATUS(NTAPI*)(PHANDLE FileHandle, ACCESS_MASK DesiredAccess, POBJECT_ATTRIBUTES ObjectAttributes, PIO_STATUS_BLOCK IoStatusBlock, PLARGE_INTEGER AllocationSize, ULONG FileAttributes, ULONG ShareAccess, ULONG CreateDisposition, ULONG CreateOptions, PVOID EaBuffer, ULONG EaLength);
+using fnNtClose = NTSTATUS(NTAPI*)(HANDLE Handle);
+using fnNtQueryInformationFile = NTSTATUS(NTAPI*)(HANDLE FileHandle, PIO_STATUS_BLOCK IoStatusBlock, PVOID FileInformation, ULONG Length, FILE_INFORMATION_CLASS FileInformationClass);
+using fnRtlAllocateHeap = PVOID(NTAPI*)(PVOID HeapHandle, ULONG Flags, SIZE_T Size);
+using fnRtlFreeHeap = BOOLEAN(NTAPI*)(PVOID HeapHandle, ULONG Flags, PVOID BaseAddress);
+using fnNtReadFile = NTSTATUS(NTAPI*)(HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE ApcRoutine, PVOID ApcContext, PIO_STATUS_BLOCK IoStatusBlock, PVOID Buffer, ULONG Length, PLARGE_INTEGER ByteOffset, PULONG Key);
+using fnNtAllocateVirtualMemory = NTSTATUS(NTAPI*)(HANDLE ProcessHandle, PVOID* BaseAddress, ULONG_PTR ZeroBits, PSIZE_T RegionSize, ULONG AllocationType, ULONG Protect);
+using fnNtFreeVirtualMemory = NTSTATUS(NTAPI*)(HANDLE ProcessHandle, PVOID* BaseAddress, PSIZE_T RegionSize, ULONG FreeType);
+using fnNtReadVirtualMemory = NTSTATUS(NTAPI*)(HANDLE ProcessHandle, PVOID BaseAddress, PVOID Buffer, ULONG NumberOfBytesToRead, PULONG NumberOfBytesReaded);
+using fnNtWriteVirtualMemory = NTSTATUS(NTAPI*)(HANDLE ProcessHandle, PVOID BaseAddress, PVOID Buffer, ULONG NumberOfBytesToWrite, PULONG NumberOfBytesWritten);
+using fnRtlInitUnicodeString = void(NTAPI*)(PUNICODE_STRING DestinationString, PCWSTR SourceString);
+using fnRtlInitAnsiString = void(NTAPI*)(PANSI_STRING DestinationString, PCSZ SourceString);
+using fnRtlUnicodeStringToAnsiString = NTSTATUS(NTAPI*)(PANSI_STRING DestinationString, PCUNICODE_STRING SourceString, BOOLEAN AllocateDestinationString);
+using fnRtlAnsiStringToUnicodeString = NTSTATUS(NTAPI*)(PUNICODE_STRING DestinationString, PCANSI_STRING SourceString, BOOLEAN AllocateDestinationString);
+using fnLdrLoadDll = NTSTATUS(NTAPI*)(PWSTR PathToFile, ULONG Flags, PUNICODE_STRING ModuleFileName, PHANDLE ModuleHandle);
+using fnLdrGetDllHandle = NTSTATUS(NTAPI*)(PWORD pwPath, PVOID Unused, PUNICODE_STRING ModuleFileName, PHANDLE pHModule);
+using fnLdrGetProcedureAddress = NTSTATUS(NTAPI*)(PVOID ModuleHandle, PANSI_STRING ProcedureName, ULONG Ordinal, PVOID* ProcedureAddress);
+using fnNtProtectVirtualMemory = NTSTATUS(NTAPI*)(HANDLE ProcessHandle, PVOID* BaseAddress, PSIZE_T NumberOfBytesToProtect, ULONG NewAccessProtection, PULONG OldAccessProtection);
+using fnNtFlushInstructionCache = NTSTATUS(NTAPI*)(HANDLE ProcessHandle, PVOID BaseAddress, ULONG NumberOfBytesToFlush);
+using fnDllMain = BOOL(WINAPI*)(HINSTANCE, DWORD, LPVOID);
+using fnNtOpenThread = NTSTATUS(NTAPI*)(PHANDLE ThreadHandle, ACCESS_MASK AccessMask, POBJECT_ATTRIBUTES ObjectAttributes, CLIENT_ID* ClientId);
+using fnNtResumeThread = NTSTATUS(NTAPI*)(HANDLE ThreadHandle, PULONG SuspendCount);
+
+typedef struct _LOADER_DATA {
+	HMODULE m_hNTDLL;
+	void* m_pImageAddress;
+	DWORD m_unMainThread;
+	fnRtlDosPathNameToNtPathName_U m_pRtlDosPathNameToNtPathName_U;
+	fnRtlFreeUnicodeString m_pRtlFreeUnicodeString;
+	fnRtlFreeAnsiString m_pRtlFreeAnsiString;
+	fnRtlInitUnicodeString m_pRtlInitUnicodeString;
+	fnRtlInitAnsiString m_pRtlInitAnsiString;
+	fnRtlUnicodeStringToAnsiString m_pRtlUnicodeStringToAnsiString;
+	fnRtlAnsiStringToUnicodeString m_pRtlAnsiStringToUnicodeString;
+	fnRtlAllocateHeap m_pRtlAllocateHeap;
+	fnRtlFreeHeap m_pRtlFreeHeap;
+	fnNtAllocateVirtualMemory m_pNtAllocateVirtualMemory;
+	fnNtFreeVirtualMemory m_pNtFreeVirtualMemory;
+	fnNtReadVirtualMemory m_pNtReadVirtualMemory;
+	fnNtWriteVirtualMemory m_pNtWriteVirtualMemory;
+	fnNtProtectVirtualMemory m_pNtProtectVirtualMemory;
+	fnNtFlushInstructionCache m_pNtFlushInstructionCache;
+	fnLdrLoadDll m_pLdrLoadDll;
+	fnLdrGetDllHandle m_pLdrGetDllHandle;
+	fnLdrGetProcedureAddress m_pLdrGetProcedureAddress;
+	fnNtOpenThread m_pNtOpenThread;
+	fnNtResumeThread m_pNtResumeThread;
+} LOADER_DATA, *PLOADER_DATA;
+
 // General definitions
 
-#define HIJACK_VERSION "1.4.3"
+#define HIJACK_VERSION "1.5.0"
 
 #define ProcessDebugObjectHandle static_cast<PROCESSINFOCLASS>(0x1E)
 #define ProcessDebugFlags static_cast<PROCESSINFOCLASS>(0x1F)
@@ -45,6 +96,8 @@ EXTERN_C NTSYSCALLAPI NTSTATUS NTAPI NtSetInformationProcess(_In_ HANDLE Process
 EXTERN_C NTSYSCALLAPI NTSTATUS NTAPI NtResumeProcess(HANDLE ProcessHandle);
 EXTERN_C NTSYSCALLAPI NTSTATUS NTAPI NtRemoveProcessDebug(IN HANDLE ProcessHandle, IN HANDLE DebugObjectHandle);
 
+DEFINE_SECTION(".load", SECTION_READWRITE)
+
 // [{
 //     PID: (HANDLE, START ADDRESS)
 // }]
@@ -54,7 +107,6 @@ std::unordered_map<DWORD, std::pair<HANDLE, LPVOID>> g_Processes;
 //     PID: ORIGINAL BYTES
 // }]
 std::unordered_map<DWORD, std::vector<unsigned char>> g_ProcessesOriginalEntryPointByte;
-
 
 // [{
 //     PID: [{
@@ -69,6 +121,20 @@ std::unordered_map<DWORD, std::unordered_map<DWORD, std::pair<HANDLE, LPVOID>>> 
 //     }]
 // }]
 std::unordered_map<DWORD, std::unordered_map<LPVOID, tstring_optional>> g_Modules;
+
+// [{
+//     PID: [
+//         HANDLE
+//     ]
+// }]
+std::unordered_map<DWORD, HANDLE> g_ProcessSuspendedMainThreads;
+
+// [{
+//     PID: [
+//         HANDLE
+//     ]
+// }]
+std::unordered_map<DWORD, HANDLE> g_ProcessInjectionThreads;
 
 bool g_bContinueDebugging = true;
 
@@ -640,6 +706,572 @@ LPVOID GetDebugModuleAddress(DWORD unProcessID, tstring ModuleName) {
 	return nullptr;
 }
 
+tstring_optional GetProcessHiJackLibraryName(HANDLE hProcess) {
+	auto ProcessPath = GetProcessPath(hProcess);
+	if (!ProcessPath.first) {
+		return { false, _T("") };
+	}
+
+	TCHAR szName[_MAX_FNAME] {};
+	errno_t err = _tsplitpath_s(ProcessPath.second.c_str(), nullptr, 0, nullptr, 0, szName, _countof(szName), nullptr, 0);
+	if (err != 0) {
+		_tprintf_s(_T("ERROR: _tsplitpath_s (Error = %i)\n"), err);
+		return { false, _T("") };
+	}
+
+	TCHAR szLibraryName[MAX_PATH] {};
+#ifdef _WIN64
+	if (_stprintf_s(szLibraryName, _countof(szLibraryName), _T("%s_hijack.dll"), szName) < 0) {
+#else
+	if (_stprintf_s(szLibraryName, _countof(szLibraryName), _T("%s_hijack32.dll"), szName) < 0) {
+#endif
+		_tprintf_s(_T("ERROR: _stprintf_s (Error = 0x%08X)\n"), GetLastError());
+		return { false, _T("") };
+	}
+
+	tstring LibraryName = szLibraryName;
+
+	std::transform(LibraryName.begin(), LibraryName.end(), LibraryName.begin(), [](TCHAR c) {
+#ifdef _UNICODE
+		return std::towlower(c);
+#else
+		return std::tolower(static_cast<unsigned char>(c));
+#endif
+	});
+
+	return { true, LibraryName };
+}
+
+bool GetRemoteModuleHandle(HANDLE hProcess, const TCHAR* szModuleName, HMODULE* phModule) {
+	if (!hProcess || (hProcess == INVALID_HANDLE_VALUE) || !szModuleName) {
+		return false;
+	}
+
+	HMODULE hModules[1024] {};
+	DWORD cbNeeded = 0;
+
+	if (EnumProcessModules(hProcess, hModules, sizeof(hModules), &cbNeeded)) {
+		for (DWORD i = 0; i < (cbNeeded / sizeof(HMODULE)); ++i) {
+			TCHAR szName[MAX_PATH] {};
+			if (GetModuleFileNameEx(hProcess, hModules[i], szName, MAX_PATH)) {
+				if (_tcsicmp(szName + _tcsclen(szName) - _tcsclen(szModuleName), szModuleName) == 0) {
+
+					if (phModule) {
+						*phModule = hModules[i];
+					}
+
+					return true;
+				}
+			}
+		}
+	}
+
+	return false;
+}
+
+template<typename T>
+bool GetRemoteProcAddress(HANDLE hProcess, const TCHAR* szModuleName, const char* szProcName, T* pFunc) {
+	if (!hProcess || (hProcess == INVALID_HANDLE_VALUE) || !szModuleName || !szProcName) {
+		return false;
+	}
+
+	HMODULE hModule = GetModuleHandle(szModuleName);
+	if (!hModule) {
+		return false;
+	}
+
+	HMODULE hRemoteModule = nullptr;
+	if (!GetRemoteModuleHandle(hProcess, szModuleName, &hRemoteModule)) {
+		return false;
+	}
+
+	T pLocalProcAddress = reinterpret_cast<T>(GetProcAddress(hModule, szProcName));
+	if (!pLocalProcAddress) {
+		return false;
+	}
+
+	const uintptr_t unOffset = reinterpret_cast<uintptr_t>(pLocalProcAddress) - reinterpret_cast<uintptr_t>(hModule);
+
+	if (pFunc) {
+		*pFunc = reinterpret_cast<T>(reinterpret_cast<uintptr_t>(hRemoteModule) + unOffset);
+	}
+
+	return true;
+}
+
+bool FillLoaderData(HANDLE hProcess, PLOADER_DATA pLoaderData) {
+	if (!hProcess || (hProcess == INVALID_HANDLE_VALUE) || !pLoaderData) {
+		return false;
+	}
+
+	if (!GetRemoteModuleHandle(hProcess, _T("ntdll.dll"), &pLoaderData->m_hNTDLL)) {
+		return false;
+	}
+
+	if (!GetRemoteProcAddress(hProcess, _T("ntdll.dll"), "RtlDosPathNameToNtPathName_U", &pLoaderData->m_pRtlDosPathNameToNtPathName_U)) {
+		return false;
+	}
+
+	if (!GetRemoteProcAddress(hProcess, _T("ntdll.dll"), "RtlFreeUnicodeString", &pLoaderData->m_pRtlFreeUnicodeString)) {
+		return false;
+	}
+
+	if (!GetRemoteProcAddress(hProcess, _T("ntdll.dll"), "RtlFreeAnsiString", &pLoaderData->m_pRtlFreeAnsiString)) {
+		return false;
+	}
+
+	if (!GetRemoteProcAddress(hProcess, _T("ntdll.dll"), "RtlInitUnicodeString", &pLoaderData->m_pRtlInitUnicodeString)) {
+		return false;
+	}
+
+	if (!GetRemoteProcAddress(hProcess, _T("ntdll.dll"), "RtlInitAnsiString", &pLoaderData->m_pRtlInitAnsiString)) {
+		return false;
+	}
+
+	if (!GetRemoteProcAddress(hProcess, _T("ntdll.dll"), "RtlUnicodeStringToAnsiString", &pLoaderData->m_pRtlUnicodeStringToAnsiString)) {
+		return false;
+	}
+
+	if (!GetRemoteProcAddress(hProcess, _T("ntdll.dll"), "RtlAnsiStringToUnicodeString", &pLoaderData->m_pRtlAnsiStringToUnicodeString)) {
+		return false;
+	}
+
+	if (!GetRemoteProcAddress(hProcess, _T("ntdll.dll"), "RtlAllocateHeap", &pLoaderData->m_pRtlAllocateHeap)) {
+		return false;
+	}
+
+	if (!GetRemoteProcAddress(hProcess, _T("ntdll.dll"), "RtlFreeHeap", &pLoaderData->m_pRtlFreeHeap)) {
+		return false;
+	}
+
+	if (!GetRemoteProcAddress(hProcess, _T("ntdll.dll"), "NtAllocateVirtualMemory", &pLoaderData->m_pNtAllocateVirtualMemory)) {
+		return false;
+	}
+
+	if (!GetRemoteProcAddress(hProcess, _T("ntdll.dll"), "NtFreeVirtualMemory", &pLoaderData->m_pNtFreeVirtualMemory)) {
+		return false;
+	}
+
+	if (!GetRemoteProcAddress(hProcess, _T("ntdll.dll"), "NtReadVirtualMemory", &pLoaderData->m_pNtReadVirtualMemory)) {
+		return false;
+	}
+
+	if (!GetRemoteProcAddress(hProcess, _T("ntdll.dll"), "NtWriteVirtualMemory", &pLoaderData->m_pNtWriteVirtualMemory)) {
+		return false;
+	}
+
+	if (!GetRemoteProcAddress(hProcess, _T("ntdll.dll"), "NtProtectVirtualMemory", &pLoaderData->m_pNtProtectVirtualMemory)) {
+		return false;
+	}
+
+	if (!GetRemoteProcAddress(hProcess, _T("ntdll.dll"), "NtFlushInstructionCache", &pLoaderData->m_pNtFlushInstructionCache)) {
+		return false;
+	}
+
+	if (!GetRemoteProcAddress(hProcess, _T("ntdll.dll"), "LdrLoadDll", &pLoaderData->m_pLdrLoadDll)) {
+		return false;
+	}
+
+	if (!GetRemoteProcAddress(hProcess, _T("ntdll.dll"), "LdrGetDllHandle", &pLoaderData->m_pLdrGetDllHandle)) {
+		return false;
+	}
+
+	if (!GetRemoteProcAddress(hProcess, _T("ntdll.dll"), "LdrGetProcedureAddress", &pLoaderData->m_pLdrGetProcedureAddress)) {
+		return false;
+	}
+
+	if (!GetRemoteProcAddress(hProcess, _T("ntdll.dll"), "NtOpenThread", &pLoaderData->m_pNtOpenThread)) {
+		return false;
+	}
+
+	if (!GetRemoteProcAddress(hProcess, _T("ntdll.dll"), "NtResumeThread", &pLoaderData->m_pNtResumeThread)) {
+		return false;
+	}
+
+	return true;
+}
+
+DEFINE_CODE_IN_SECTION(".load") bool MapImage(PLOADER_DATA pLD) {
+	PIMAGE_DOS_HEADER pDH = reinterpret_cast<PIMAGE_DOS_HEADER>(pLD->m_pImageAddress);
+	PIMAGE_NT_HEADERS pNTHs = reinterpret_cast<PIMAGE_NT_HEADERS>(reinterpret_cast<char*>(pDH) + pDH->e_lfanew);
+
+	PVOID pDesiredBase = reinterpret_cast<PVOID>(pNTHs->OptionalHeader.ImageBase);
+	SIZE_T unSizeOfImage = pNTHs->OptionalHeader.SizeOfImage;
+
+	if (!NT_SUCCESS(pLD->m_pNtAllocateVirtualMemory(reinterpret_cast<HANDLE>(-1), &pDesiredBase, 0, &unSizeOfImage, MEM_RESERVE, PAGE_READWRITE))) {
+		pDesiredBase = nullptr;
+		if (!NT_SUCCESS(pLD->m_pNtAllocateVirtualMemory(reinterpret_cast<HANDLE>(-1), &pDesiredBase, 0, &unSizeOfImage, MEM_RESERVE, PAGE_READWRITE))) {
+			return false;
+		}
+	}
+
+	PVOID pHeaders = pDesiredBase;
+	SIZE_T unSizeOfHeaders = pNTHs->OptionalHeader.SizeOfHeaders;
+	if (!NT_SUCCESS(pLD->m_pNtAllocateVirtualMemory(reinterpret_cast<HANDLE>(-1), &pHeaders, 0, &unSizeOfHeaders, MEM_COMMIT, PAGE_READWRITE))) {
+		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pDesiredBase, &unSizeOfImage, MEM_RELEASE);
+		return false;
+	}
+
+	if (!NT_SUCCESS(pLD->m_pNtWriteVirtualMemory(reinterpret_cast<HANDLE>(-1), pDesiredBase, pDH, pNTHs->OptionalHeader.SizeOfHeaders, nullptr))) {
+		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pDesiredBase, &unSizeOfImage, MEM_RELEASE);
+		return false;
+	}
+
+	PIMAGE_SECTION_HEADER pFirstSection = IMAGE_FIRST_SECTION(pNTHs);
+	for (WORD i = 0; i < pNTHs->FileHeader.NumberOfSections; ++i) {
+		if (pFirstSection[i].SizeOfRawData == 0) {
+			continue;
+		}
+
+		PVOID pSectionAddress = reinterpret_cast<PVOID>(reinterpret_cast<ULONG_PTR>(pDesiredBase) + pFirstSection[i].VirtualAddress);
+		SIZE_T unSectionSize = pFirstSection[i].Misc.VirtualSize;
+		PVOID pSectionData = reinterpret_cast<PVOID>(reinterpret_cast<ULONG_PTR>(pDH) + pFirstSection[i].PointerToRawData);
+
+		if (!NT_SUCCESS(pLD->m_pNtAllocateVirtualMemory(reinterpret_cast<HANDLE>(-1), &pSectionAddress, 0, &unSectionSize, MEM_COMMIT, PAGE_READWRITE))) {
+			pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pDesiredBase, &unSizeOfImage, MEM_RELEASE);
+			return false;
+		}
+
+		if (!NT_SUCCESS(pLD->m_pNtWriteVirtualMemory(reinterpret_cast<HANDLE>(-1), pSectionAddress, pSectionData, pFirstSection[i].SizeOfRawData, nullptr))) {
+			pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pDesiredBase, &unSizeOfImage, MEM_RELEASE);
+			return false;
+		}
+	}
+
+	SIZE_T unSize = 0;
+	pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
+	pLD->m_pImageAddress = pDesiredBase;
+
+	return true;
+}
+
+DEFINE_CODE_IN_SECTION(".load") bool FixRelocations(PLOADER_DATA pLD) {
+    PIMAGE_DOS_HEADER pDH = reinterpret_cast<PIMAGE_DOS_HEADER>(pLD->m_pImageAddress);
+    PIMAGE_NT_HEADERS pNTHs = reinterpret_cast<PIMAGE_NT_HEADERS>(reinterpret_cast<char*>(pDH) + pDH->e_lfanew);
+
+    if (pNTHs->FileHeader.Characteristics & IMAGE_FILE_RELOCS_STRIPPED) {
+        return true;
+    }
+
+    const DWORD_PTR unDelta = reinterpret_cast<DWORD_PTR>(pDH) - pNTHs->OptionalHeader.ImageBase;
+    if (!unDelta) {
+        return true;
+    }
+
+    PIMAGE_DATA_DIRECTORY RelocationDirectory = &pNTHs->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+    if (!RelocationDirectory->VirtualAddress || !RelocationDirectory->Size) {
+        return true;
+    }
+
+    const WORD unMachine = pNTHs->FileHeader.Machine;
+
+    PIMAGE_BASE_RELOCATION Relocation = reinterpret_cast<PIMAGE_BASE_RELOCATION>(reinterpret_cast<char*>(pDH) + RelocationDirectory->VirtualAddress);
+    while (Relocation->VirtualAddress && Relocation->SizeOfBlock) {
+        DWORD_PTR unRelocationBase = reinterpret_cast<DWORD_PTR>(pDH) + Relocation->VirtualAddress;
+        DWORD unCount = (Relocation->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
+        PWORD unEntries = reinterpret_cast<PWORD>(Relocation + 1);
+
+        for (DWORD i = 0; i < unCount; ++i) {
+            WORD unEntry = unEntries[i];
+            BYTE unType = unEntry >> 12;
+            WORD unOffset = unEntry & 0xFFF;
+
+            DWORD_PTR unPatchAddress = unRelocationBase + unOffset;
+
+            switch (unType) {
+                case IMAGE_REL_BASED_ABSOLUTE:
+                    break;
+
+                case IMAGE_REL_BASED_HIGH:
+                    *reinterpret_cast<WORD*>(unPatchAddress) += HIWORD(static_cast<DWORD>(unDelta));
+                    break;
+
+                case IMAGE_REL_BASED_LOW:
+                    *reinterpret_cast<WORD*>(unPatchAddress) += LOWORD(static_cast<DWORD>(unDelta));
+                    break;
+
+                case IMAGE_REL_BASED_HIGHLOW:
+                    *reinterpret_cast<DWORD*>(unPatchAddress) += static_cast<DWORD>(unDelta);
+                    break;
+
+                case IMAGE_REL_BASED_HIGHADJ: {
+                    if (i + 1 >= unCount) {
+                        return false;
+                    }
+
+                    WORD unNextEntry = unEntries[++i];
+                    if ((unNextEntry >> 12) != IMAGE_REL_BASED_LOW) {
+                        return false;
+                    }
+
+                    DWORD unHighAdj = *reinterpret_cast<WORD*>(unPatchAddress) << 16;
+                    unHighAdj += static_cast<DWORD>(unDelta);
+                    unHighAdj += static_cast<SHORT>(unNextEntry & 0xFFF);
+
+                    *reinterpret_cast<WORD*>(unPatchAddress) = HIWORD(unHighAdj);
+                    break;
+                }
+
+                case IMAGE_REL_BASED_DIR64:
+                    *reinterpret_cast<ULONGLONG*>(unPatchAddress) += unDelta;
+                    break;
+
+                case IMAGE_REL_BASED_MACHINE_SPECIFIC_5:
+                    switch (unMachine) {
+                        case IMAGE_FILE_MACHINE_ARMNT:
+                        case IMAGE_FILE_MACHINE_THUMB:
+                            *reinterpret_cast<DWORD*>(unPatchAddress) += static_cast<DWORD>(unDelta);
+                            break;
+
+                        case IMAGE_FILE_MACHINE_MIPS16:
+                        case IMAGE_FILE_MACHINE_MIPSFPU:
+                        case IMAGE_FILE_MACHINE_MIPSFPU16: {
+                            DWORD unIns = *reinterpret_cast<DWORD*>(unPatchAddress);
+                            unIns = (unIns & ~0x03FFFFFF) | ((((unIns & 0x03FFFFFF) << 2) + static_cast<DWORD>(unDelta)) >> 2);
+                            *reinterpret_cast<DWORD*>(unPatchAddress) = unIns;
+                            break;
+                        }
+
+                        default:
+                            return false;
+                    }
+                    break;
+
+                case IMAGE_REL_BASED_THUMB_MOV32:
+                    if (unMachine == IMAGE_FILE_MACHINE_ARMNT) {
+                        *reinterpret_cast<DWORD*>(unPatchAddress) += static_cast<DWORD>(unDelta);
+                    } else {
+                        return false;
+                    }
+                    break;
+
+                case IMAGE_REL_BASED_MACHINE_SPECIFIC_9:
+                    switch (unMachine) {
+                        case IMAGE_FILE_MACHINE_IA64:
+                            *reinterpret_cast<ULONGLONG*>(unPatchAddress) += unDelta;
+                            break;
+
+                        case IMAGE_FILE_MACHINE_MIPS16:
+                        case IMAGE_FILE_MACHINE_MIPSFPU:
+                        case IMAGE_FILE_MACHINE_MIPSFPU16: {
+                            WORD unIns = *reinterpret_cast<WORD*>(unPatchAddress);
+                            unIns = (unIns & ~0xFFFF) | ((((unIns & 0xFFFF) << 2) + static_cast<WORD>(unDelta)) >> 2);
+                            *reinterpret_cast<WORD*>(unPatchAddress) = unIns;
+                            break;
+                        }
+
+                        default:
+                            return false;
+                    }
+                    break;
+
+                default:
+                    return false;
+            }
+        }
+
+        Relocation = reinterpret_cast<PIMAGE_BASE_RELOCATION>(reinterpret_cast<char*>(Relocation) + Relocation->SizeOfBlock);
+    }
+
+    return true;
+}
+
+DEFINE_CODE_IN_SECTION(".load") bool ResolveImports(PLOADER_DATA pLD) {
+    PIMAGE_DOS_HEADER pDH = reinterpret_cast<PIMAGE_DOS_HEADER>(pLD->m_pImageAddress);
+    PIMAGE_NT_HEADERS pNTHs = reinterpret_cast<PIMAGE_NT_HEADERS>(reinterpret_cast<char*>(pDH) + pDH->e_lfanew);
+
+    PIMAGE_DATA_DIRECTORY ImportDirectory = &pNTHs->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!ImportDirectory->VirtualAddress) {
+        return true;
+    }
+
+    PIMAGE_IMPORT_DESCRIPTOR pImportDescriptor = reinterpret_cast<PIMAGE_IMPORT_DESCRIPTOR>(reinterpret_cast<char*>(pDH) + ImportDirectory->VirtualAddress);
+    while (pImportDescriptor->Name) {
+        const char* szModuleName = reinterpret_cast<const char*>(reinterpret_cast<char*>(pDH) + pImportDescriptor->Name);
+
+        ANSI_STRING as {};
+        UNICODE_STRING NTModule {};
+        pLD->m_pRtlInitAnsiString(&as, szModuleName);
+        if (!NT_SUCCESS(pLD->m_pRtlAnsiStringToUnicodeString(&NTModule, &as, TRUE))) {
+            return false;
+        }
+
+        HMODULE hModule = nullptr;
+        if (!NT_SUCCESS(pLD->m_pLdrLoadDll(NULL, 0, &NTModule, reinterpret_cast<PHANDLE>(&hModule)))) {
+        //if (!NT_SUCCESS(pLD->m_pLdrGetDllHandle(NULL, 0, &NTModule, reinterpret_cast<PHANDLE>(&hModule)))) {
+            pLD->m_pRtlFreeUnicodeString(&NTModule);
+            return false;
+        }
+
+        pLD->m_pRtlFreeUnicodeString(&NTModule);
+
+        PIMAGE_THUNK_DATA pThunk = reinterpret_cast<PIMAGE_THUNK_DATA>(reinterpret_cast<char*>(pDH) + pImportDescriptor->OriginalFirstThunk);
+        PIMAGE_THUNK_DATA pIAT = reinterpret_cast<PIMAGE_THUNK_DATA>(reinterpret_cast<char*>(pDH) + pImportDescriptor->FirstThunk);
+        while (pThunk->u1.AddressOfData) {
+            if (pThunk->u1.Ordinal & IMAGE_ORDINAL_FLAG) {
+                ULONG unOrdinal = IMAGE_ORDINAL(pThunk->u1.Ordinal);
+                PVOID pProcedure = nullptr;
+                if (!NT_SUCCESS(pLD->m_pLdrGetProcedureAddress(hModule, NULL, unOrdinal, &pProcedure))) {
+                    return false;
+                }
+
+                pIAT->u1.Function = reinterpret_cast<ULONG_PTR>(pProcedure);
+            } else {
+                PIMAGE_IMPORT_BY_NAME NameData = reinterpret_cast<PIMAGE_IMPORT_BY_NAME>(reinterpret_cast<char*>(pDH) + pThunk->u1.AddressOfData);
+                ANSI_STRING as;
+                pLD->m_pRtlInitAnsiString(&as, NameData->Name);
+                PVOID pProcedure = nullptr;
+                if (!NT_SUCCESS(pLD->m_pLdrGetProcedureAddress(hModule, &as, 0, &pProcedure))) {
+                    return false;
+                }
+
+                pIAT->u1.Function = reinterpret_cast<ULONG_PTR>(pProcedure);
+            }
+
+            ++pThunk;
+            ++pIAT;
+        }
+
+        ++pImportDescriptor;
+    }
+    return true;
+}
+
+DEFINE_CODE_IN_SECTION(".load") bool ProtectSections(PLOADER_DATA pLD) {
+    PIMAGE_DOS_HEADER pDH = reinterpret_cast<PIMAGE_DOS_HEADER>(pLD->m_pImageAddress);
+    PIMAGE_NT_HEADERS pNTHs = reinterpret_cast<PIMAGE_NT_HEADERS>(reinterpret_cast<char*>(pDH) + pDH->e_lfanew);
+
+    PIMAGE_SECTION_HEADER pFirstSection = IMAGE_FIRST_SECTION(pNTHs);
+    for (WORD i = 0; i < pNTHs->FileHeader.NumberOfSections; ++i) {
+        DWORD unProtect = 0;
+        DWORD unCharacteristics = pFirstSection[i].Characteristics;
+
+        if (unCharacteristics & IMAGE_SCN_MEM_EXECUTE) {
+            unProtect = (unCharacteristics & IMAGE_SCN_MEM_WRITE) ? PAGE_EXECUTE_READWRITE : PAGE_EXECUTE_READ;
+        } else if (unCharacteristics & IMAGE_SCN_MEM_WRITE) {
+            unProtect = PAGE_READWRITE;
+        } else if (unCharacteristics & IMAGE_SCN_MEM_READ) {
+            unProtect = PAGE_READONLY;
+        } else {
+            unProtect = PAGE_NOACCESS;
+        }
+
+        PVOID pAddress = reinterpret_cast<PVOID>(reinterpret_cast<char*>(pDH) + pFirstSection[i].VirtualAddress);
+        SIZE_T unVirtualSize = pFirstSection[i].Misc.VirtualSize;
+        ULONG unOldProtect = 0;
+        if (!NT_SUCCESS(pLD->m_pNtProtectVirtualMemory(reinterpret_cast<HANDLE>(-1), &pAddress, &unVirtualSize, unProtect, &unOldProtect))) {
+            return false;
+        }
+
+		if (unCharacteristics & IMAGE_SCN_MEM_EXECUTE) {
+			pLD->m_pNtFlushInstructionCache(reinterpret_cast<HANDLE>(-1), nullptr, 0);
+		}
+    }
+    return true;
+}
+
+DEFINE_CODE_IN_SECTION(".load") bool ExecuteTLS(PLOADER_DATA pLD, DWORD unReason) {
+    PIMAGE_DOS_HEADER pDH = reinterpret_cast<PIMAGE_DOS_HEADER>(pLD->m_pImageAddress);
+    PIMAGE_NT_HEADERS pNTHs = reinterpret_cast<PIMAGE_NT_HEADERS>(reinterpret_cast<char*>(pDH) + pDH->e_lfanew);
+
+    PIMAGE_DATA_DIRECTORY TLSDirectory = &pNTHs->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
+    if (!TLSDirectory->VirtualAddress) {
+        return true;
+    }
+
+    PIMAGE_TLS_DIRECTORY pTLS = reinterpret_cast<PIMAGE_TLS_DIRECTORY>(reinterpret_cast<char*>(pDH) + TLSDirectory->VirtualAddress);
+    PIMAGE_TLS_CALLBACK* pCallBacks = reinterpret_cast<PIMAGE_TLS_CALLBACK*>(pTLS->AddressOfCallBacks);
+    if (pCallBacks) {
+        while (*pCallBacks) {
+            (*pCallBacks)(pDH, unReason, nullptr);
+            ++pCallBacks;
+        }
+    }
+
+    return true;
+}
+
+DEFINE_CODE_IN_SECTION(".load") bool CallDllMain(PLOADER_DATA pLD, DWORD unReason) {
+    PIMAGE_DOS_HEADER pDH = reinterpret_cast<PIMAGE_DOS_HEADER>(pLD->m_pImageAddress);
+    PIMAGE_NT_HEADERS pNTHs = reinterpret_cast<PIMAGE_NT_HEADERS>(reinterpret_cast<char*>(pDH) + pDH->e_lfanew);
+
+    if (!pNTHs->OptionalHeader.AddressOfEntryPoint) {
+        return true;
+    }
+
+    fnDllMain EntryPoint = reinterpret_cast<fnDllMain>(reinterpret_cast<char*>(pDH) + pNTHs->OptionalHeader.AddressOfEntryPoint);
+    EntryPoint(reinterpret_cast<HINSTANCE>(pDH), unReason, nullptr);
+
+    return true;
+}
+
+DEFINE_DATA_IN_SECTION(".load") LOADER_DATA LoaderData;
+DEFINE_CODE_IN_SECTION(".load") DWORD WINAPI Loader(LPVOID lpParameter) { SELF_INCLUDE;
+	PLOADER_DATA pLD = reinterpret_cast<PLOADER_DATA>(lpParameter);
+	if (!pLD) {
+		return EXIT_FAILURE;
+	}
+
+	if (!pLD->m_hNTDLL || !pLD->m_pImageAddress) {
+		return EXIT_FAILURE;
+	}
+
+	if (!MapImage(pLD)) {
+		return EXIT_FAILURE;
+	}
+
+	if (!FixRelocations(pLD)) {
+		SIZE_T unSize = 0;
+		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
+		return EXIT_FAILURE;
+	}
+
+	if (!ResolveImports(pLD)) { // Compile only with /MT, /MTd
+		SIZE_T unSize = 0;
+		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
+		return EXIT_FAILURE;
+	}
+
+	if (!ProtectSections(pLD)) {
+		SIZE_T unSize = 0;
+		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
+		return EXIT_FAILURE;
+	}
+
+	if (!ExecuteTLS(pLD, DLL_PROCESS_ATTACH)) { // Useless for simple patching dlls
+		SIZE_T unSize = 0;
+		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
+		return EXIT_FAILURE;
+	}
+
+	if (!CallDllMain(pLD, DLL_PROCESS_ATTACH)) {
+		SIZE_T unSize = 0;
+		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
+		return EXIT_FAILURE;
+	}
+
+	CLIENT_ID cid {};
+	cid.UniqueProcess = nullptr;
+	cid.UniqueThread = reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(pLD->m_unMainThread));
+
+	OBJECT_ATTRIBUTES oa {};
+	InitializeObjectAttributes(&oa, nullptr, 0, nullptr, nullptr);
+
+	//HANDLE hMainThread = nullptr;
+	//if (!NT_SUCCESS(pLD->m_pNtOpenThread(&hMainThread, THREAD_SUSPEND_RESUME, &oa, &cid))) {
+	//	return EXIT_FAILURE;
+	//}
+
+	//DWORD unSuspendCount = 0;
+	//if (!NT_SUCCESS(pLD->m_pNtResumeThread(hMainThread, &unSuspendCount))) {
+	//	SIZE_T unSize = 0;
+	//	pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
+	//	return EXIT_FAILURE;
+	//}
+
+	return EXIT_SUCCESS;
+}
+
 void OnCreateProcessEvent(DWORD unProcessID) {
 #ifdef _DEBUG
 	_tprintf_s(_T("PROCESSCREATE: %lu\n"), unProcessID);
@@ -662,6 +1294,22 @@ void OnExitThreadEvent(DWORD unProcessID, DWORD unThreadID, DWORD unExitCode) {
 #ifdef _DEBUG
 	_tprintf_s(_T("THREADEXIT(%lu, %lu): %lu\n"), unProcessID, unThreadID, unExitCode);
 #endif // _DEBUG
+
+	if ((g_ProcessInjectionThreads.find(unProcessID) != g_ProcessInjectionThreads.end()) && (g_ProcessSuspendedMainThreads.find(unProcessID) != g_ProcessSuspendedMainThreads.end())) {
+		if (GetThreadId(g_ProcessInjectionThreads[unProcessID]) == unThreadID) {
+			if (!unExitCode) {
+#ifdef _DEBUG
+				_tprintf_s(_T("INJECTED!\n"));
+#endif
+				g_bContinueDebugging = false;
+			}
+
+			ResumeThread(g_ProcessSuspendedMainThreads[unProcessID]);
+			CloseHandle(g_ProcessInjectionThreads[unProcessID]);
+			g_ProcessInjectionThreads.erase(unProcessID);
+			return;
+		}
+	}
 }
 
 void OnLoadModuleEvent(DWORD unProcessID, DWORD unThreadID, LPVOID pImageBase) {
@@ -794,7 +1442,190 @@ void OnEntryPoint(DWORD unProcessID, DWORD unThreadID) {
 	_tprintf_s(_T("ONENTRYPOINT(%lu): %lu\n"), unProcessID, unThreadID);
 #endif // !_DEBUG
 
-	g_bContinueDebugging = false; // There is no point in debugging further
+	auto Process = GetDebugProcess(unProcessID);
+	if (!Process) {
+		return;
+	}
+
+	auto Thread = GetDebugThread(unProcessID, unThreadID);
+	if (!Thread) {
+		return;
+	}
+
+	auto ProcessDirectory = GetProcessDirectory(Process);
+	if (!ProcessDirectory.first) {
+		return;
+	}
+
+	auto ProcessInjectLibraryName = GetProcessHiJackLibraryName(Process);
+	if (!ProcessInjectLibraryName.first) {
+		return;
+	}
+
+	auto ProcessHiJackLibraryPath = ProcessDirectory.second + ProcessInjectLibraryName.second;
+
+	DWORD dwAttrib = GetFileAttributes(ProcessHiJackLibraryPath.c_str());
+	if (!((dwAttrib != INVALID_FILE_ATTRIBUTES) && !(dwAttrib & FILE_ATTRIBUTE_DIRECTORY))) { // File not exist
+		g_bContinueDebugging = false;
+		return;
+	}
+
+	HANDLE hFile = CreateFile(ProcessHiJackLibraryPath.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+	if (!hFile || (hFile == INVALID_HANDLE_VALUE)) {
+		_tprintf_s(_T("ERROR: CreateFile (Error = 0x%08X)\n"), GetLastError());
+		return;
+	}
+
+	HANDLE hMapFile = CreateFileMapping(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
+	if (!hMapFile || (hMapFile == INVALID_HANDLE_VALUE)) {
+		_tprintf_s(_T("ERROR: CreateFileMapping (Error = 0x%08X)\n"), GetLastError());
+		CloseHandle(hFile);
+		return;
+	}
+
+	void* pMap = MapViewOfFile(hMapFile, FILE_MAP_READ, 0, 0, 0);
+	if (!pMap) {
+		_tprintf_s(_T("ERROR: MapViewOfFile (Error = 0x%08X)\n"), GetLastError());
+		CloseHandle(hMapFile);
+		CloseHandle(hFile);
+		return;
+	}
+
+	PIMAGE_DOS_HEADER pDH = reinterpret_cast<PIMAGE_DOS_HEADER>(pMap);
+	PIMAGE_NT_HEADERS pTempNTHs = reinterpret_cast<PIMAGE_NT_HEADERS>(reinterpret_cast<char*>(pDH) + pDH->e_lfanew);
+	if (pTempNTHs->Signature != IMAGE_NT_SIGNATURE) {
+		_tprintf_s(_T("ERROR: Invalid PE header!\n"));
+		UnmapViewOfFile(pMap);
+		CloseHandle(hMapFile);
+		CloseHandle(hFile);
+		return;
+	}
+
+#ifdef _WIN64
+	if (pTempNTHs->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64) {
+		_tprintf_s(_T("ERROR: This library cannot be loaded in 64 bit!\n"));
+		UnmapViewOfFile(pMap);
+		CloseHandle(hMapFile);
+		CloseHandle(hFile);
+		return;
+	}
+
+	PIMAGE_NT_HEADERS64 pNTHs = reinterpret_cast<PIMAGE_NT_HEADERS64>(pTempNTHs);
+	if (pNTHs->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
+		_tprintf_s(_T("ERROR: Invalid PE header!\n"));
+		UnmapViewOfFile(pMap);
+		CloseHandle(hMapFile);
+		CloseHandle(hFile);
+		return;
+	}
+#else
+	if (pTempNTHs->FileHeader.Machine != IMAGE_FILE_MACHINE_I386) {
+		_tprintf_s(_T("ERROR: This library cannot be loaded in 32 bit!\n"));
+		UnmapViewOfFile(pMap);
+		CloseHandle(hMapFile);
+		CloseHandle(hFile);
+		return;
+	}
+
+	PIMAGE_NT_HEADERS32 pNTHs = reinterpret_cast<PIMAGE_NT_HEADERS32>(pTempNTHs);
+	if (pNTHs->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC) {
+		_tprintf_s(_T("ERROR: Invalid PE header!\n"));
+		UnmapViewOfFile(pMap);
+		CloseHandle(hMapFile);
+		CloseHandle(hFile);
+		return;
+	}
+#endif
+
+	LARGE_INTEGER FileSize {};
+	if (!GetFileSizeEx(hFile, &FileSize)) {
+		_tprintf_s(_T("ERROR: GetFileSizeEx failed (Error = 0x%08X)\n"), GetLastError());
+		UnmapViewOfFile(pMap);
+		CloseHandle(hMapFile);
+		CloseHandle(hFile);
+		return;
+	}
+
+	if (FileSize.QuadPart <= 0) {
+		_tprintf_s(_T("ERROR: Invalid file size\n"));
+		UnmapViewOfFile(pMap);
+		CloseHandle(hMapFile);
+		CloseHandle(hFile);
+		return;
+	}
+
+	const size_t unFileSize = static_cast<size_t>(FileSize.QuadPart);
+
+	LPVOID pImageAddress = VirtualAllocEx(Process, nullptr, unFileSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+	if (!pImageAddress) {
+		UnmapViewOfFile(pMap);
+		CloseHandle(hMapFile);
+		CloseHandle(hFile);
+		return;
+	}
+
+	SIZE_T unBytesWritten = 0;
+	if (!WriteProcessMemory(Process, pImageAddress, pMap, unFileSize, &unBytesWritten)) {
+		VirtualFreeEx(Process, pImageAddress, 0, MEM_RELEASE);
+		UnmapViewOfFile(pMap);
+		CloseHandle(hMapFile);
+		CloseHandle(hFile);
+		return;
+	}
+
+	UnmapViewOfFile(pMap);
+	CloseHandle(hMapFile);
+	CloseHandle(hFile);
+
+	void* pSection = nullptr;
+	size_t unSectionSize = 0;
+	if (!Detours::Scan::FindSection(GetModuleHandle(nullptr), { '.', 'l', 'o', 'a', 'd', 0, 0, 0 }, &pSection, &unSectionSize)) {
+		VirtualFreeEx(Process, pImageAddress, 0, MEM_RELEASE);
+		return;
+	}
+
+	LoaderData.m_pImageAddress = pImageAddress;
+	LoaderData.m_unMainThread = unThreadID;
+
+	if (!FillLoaderData(Process, &LoaderData)) {
+		VirtualFreeEx(Process, pImageAddress, 0, MEM_RELEASE);
+		return;
+	}
+
+	const size_t unLoaderDataOffset = reinterpret_cast<size_t>(&LoaderData) - reinterpret_cast<size_t>(pSection);
+	const size_t unLoaderOffset = reinterpret_cast<size_t>(&Loader) - reinterpret_cast<size_t>(pSection);
+
+	void* pRemoteSection = VirtualAllocEx(Process, nullptr, unSectionSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+	if (!pRemoteSection) {
+		VirtualFreeEx(Process, pImageAddress, 0, MEM_RELEASE);
+		return;
+	}
+
+	if (!WriteProcessMemory(Process, pRemoteSection, pSection, unSectionSize, nullptr)) {
+		VirtualFreeEx(Process, pRemoteSection, 0, MEM_RELEASE);
+		VirtualFreeEx(Process, pImageAddress, 0, MEM_RELEASE);
+		return;
+	}
+
+	NtFlushInstructionCache(Process, nullptr, 0);
+
+	void* pRemoteLoaderData = reinterpret_cast<void*>(reinterpret_cast<size_t>(pRemoteSection) + unLoaderDataOffset);
+	void* pRemoteLoader = reinterpret_cast<void*>(reinterpret_cast<size_t>(pRemoteSection) + unLoaderOffset);
+
+	if (SuspendThread(Thread) != 0) {
+		VirtualFreeEx(Process, pRemoteSection, 0, MEM_RELEASE);
+		VirtualFreeEx(Process, pImageAddress, 0, MEM_RELEASE);
+		return;
+	}
+
+	g_ProcessSuspendedMainThreads[unProcessID] = Thread;
+
+	HANDLE hThread = CreateRemoteThread(Process, nullptr, 0, reinterpret_cast<LPTHREAD_START_ROUTINE>(pRemoteLoader), pRemoteLoaderData, 0, nullptr);
+	if (hThread && (hThread != INVALID_HANDLE_VALUE)) {
+		g_ProcessInjectionThreads[unProcessID] = hThread;
+	}
+
+	//g_bContinueDebugging = false; // There is no point in debugging further
 }
 
 void OnTimeout() {
@@ -808,10 +1639,11 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 		return false;
 	}
 
-	DEBUG_EVENT DebugEvent;
+	DEBUG_EVENT DebugEvent {};
 	bool bSeenInitialBreakPoint = false;
 
 	std::vector<unsigned char> vecBreakPointBytes = { 0xCC };
+
 	std::vector<unsigned char> vecBreakPointOriginalBytes(vecBreakPointBytes.size());
 
 	while (*pbContinue) {
@@ -854,6 +1686,8 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 					g_Threads.erase(DebugEvent.dwProcessId);
 					g_ProcessesOriginalEntryPointByte.erase(DebugEvent.dwProcessId);
 					g_Processes.erase(DebugEvent.dwProcessId);
+					g_ProcessSuspendedMainThreads.erase(DebugEvent.dwProcessId);
+					g_ProcessInjectionThreads.erase(DebugEvent.dwProcessId);
 
 					if (g_Processes.empty()) {
 						*pbContinue = false;
