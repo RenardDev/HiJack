@@ -53,8 +53,6 @@ using fnLdrGetProcedureAddress = NTSTATUS(NTAPI*)(PVOID ModuleHandle, PANSI_STRI
 using fnNtProtectVirtualMemory = NTSTATUS(NTAPI*)(HANDLE ProcessHandle, PVOID* BaseAddress, PSIZE_T NumberOfBytesToProtect, ULONG NewAccessProtection, PULONG OldAccessProtection);
 using fnNtFlushInstructionCache = NTSTATUS(NTAPI*)(HANDLE ProcessHandle, PVOID BaseAddress, ULONG NumberOfBytesToFlush);
 using fnDllMain = BOOL(WINAPI*)(HINSTANCE, DWORD, LPVOID);
-using fnNtOpenThread = NTSTATUS(NTAPI*)(PHANDLE ThreadHandle, ACCESS_MASK AccessMask, POBJECT_ATTRIBUTES ObjectAttributes, CLIENT_ID* ClientId);
-using fnNtResumeThread = NTSTATUS(NTAPI*)(HANDLE ThreadHandle, PULONG SuspendCount);
 
 typedef struct _LOADER_DATA {
 	HMODULE m_hNTDLL;
@@ -78,8 +76,6 @@ typedef struct _LOADER_DATA {
 	fnLdrLoadDll m_pLdrLoadDll;
 	fnLdrGetDllHandle m_pLdrGetDllHandle;
 	fnLdrGetProcedureAddress m_pLdrGetProcedureAddress;
-	fnNtOpenThread m_pNtOpenThread;
-	fnNtResumeThread m_pNtResumeThread;
 } LOADER_DATA, *PLOADER_DATA;
 
 // General definitions
@@ -877,14 +873,6 @@ bool FillLoaderData(HANDLE hProcess, PLOADER_DATA pLoaderData) {
 	}
 
 	if (!GetRemoteProcAddress(hProcess, _T("ntdll.dll"), "LdrGetProcedureAddress", &pLoaderData->m_pLdrGetProcedureAddress)) {
-		return false;
-	}
-
-	if (!GetRemoteProcAddress(hProcess, _T("ntdll.dll"), "NtOpenThread", &pLoaderData->m_pNtOpenThread)) {
-		return false;
-	}
-
-	if (!GetRemoteProcAddress(hProcess, _T("ntdll.dll"), "NtResumeThread", &pLoaderData->m_pNtResumeThread)) {
 		return false;
 	}
 
