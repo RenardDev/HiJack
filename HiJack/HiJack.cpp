@@ -149,7 +149,7 @@ std::unordered_map<DWORD, std::unordered_map<DWORD, LPVOID>> g_DLLEntryPointReAr
 // [{
 //     PID: ORIGINAL BYTES
 // }]
-std::unordered_map<DWORD, std::vector<unsigned char>> g_ProcessesOriginalEntryPointByte;
+std::unordered_map<DWORD, BYTE> g_ProcessesOriginalEntryPointByte;
 
 // [{
 //     PID: [{
@@ -995,18 +995,15 @@ static void RestoreAllProcessBreakPoints(DWORD unProcessID) {
 
 	auto itEntryPointOriginalByte = g_ProcessesOriginalEntryPointByte.find(unProcessID);
 	if (itEntryPointOriginalByte != g_ProcessesOriginalEntryPointByte.end()) {
-		size_t unSize = itEntryPointOriginalByte->second.size();
-		if (unSize) {
-			MEMORY_BASIC_INFORMATION mbi {};
-			if (VirtualQueryEx(Process, pStartAddress, &mbi, sizeof(mbi))) {
-				DWORD unOldProtection = 0;
-				if (VirtualProtectEx(Process, mbi.BaseAddress, unSize, PAGE_EXECUTE_READWRITE, &unOldProtection)) {
-					SIZE_T unWritten = 0;
-					WriteProcessMemory(Process, pStartAddress, itEntryPointOriginalByte->second.data(), unSize, &unWritten);
-					FlushInstructionCache(Process, pStartAddress, unSize);
-					DWORD unDummy = 0;
-					VirtualProtectEx(Process, mbi.BaseAddress, unSize, unOldProtection, &unDummy);
-				}
+		MEMORY_BASIC_INFORMATION mbi {};
+		if (VirtualQueryEx(Process, pStartAddress, &mbi, sizeof(mbi))) {
+			DWORD unOldProtection = 0;
+			if (VirtualProtectEx(Process, mbi.BaseAddress, 1, PAGE_EXECUTE_READWRITE, &unOldProtection)) {
+				SIZE_T unWritten = 0;
+				WriteProcessMemory(Process, pStartAddress, &itEntryPointOriginalByte->second, 1, &unWritten);
+				FlushInstructionCache(Process, pStartAddress, 1);
+				DWORD unDummy = 0;
+				VirtualProtectEx(Process, mbi.BaseAddress, 1, unOldProtection, &unDummy);
 			}
 		}
 
@@ -2072,8 +2069,8 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 	DEBUG_EVENT DebugEvent {};
 	bool bSeenInitialBreakPoint = false;
 
-	std::vector<unsigned char> vecBreakPointBytes = { 0xCC };
-	std::vector<unsigned char> vecBreakPointOriginalBytes(vecBreakPointBytes.size());
+	const BYTE unBreakPointByte = 0xCC;
+	BYTE unOriginalEntryByte = 0;
 
 	while (*pbContinue) {
 		if (WaitForDebugEvent(&DebugEvent, unTimeout)) {
@@ -2096,22 +2093,22 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 
 					// Setting breakpoint for entrypoint
 
-					if (!ReadProcessMemory(DebugEvent.u.CreateProcessInfo.hProcess, DebugEvent.u.CreateProcessInfo.lpStartAddress, vecBreakPointOriginalBytes.data(), vecBreakPointOriginalBytes.size(), nullptr)) {
+					if (!ReadProcessMemory(DebugEvent.u.CreateProcessInfo.hProcess, DebugEvent.u.CreateProcessInfo.lpStartAddress, &unOriginalEntryByte, 1, nullptr)) {
 						*pbContinue = false;
 						break;
 					}
 
-					if (!WriteProcessMemory(DebugEvent.u.CreateProcessInfo.hProcess, DebugEvent.u.CreateProcessInfo.lpStartAddress, vecBreakPointBytes.data(), vecBreakPointBytes.size(), nullptr)) {
+					if (!WriteProcessMemory(DebugEvent.u.CreateProcessInfo.hProcess, DebugEvent.u.CreateProcessInfo.lpStartAddress, &unBreakPointByte, 1, nullptr)) {
 						*pbContinue = false;
 						break;
 					}
 
-					FlushInstructionCache(DebugEvent.u.CreateProcessInfo.hProcess, DebugEvent.u.CreateProcessInfo.lpStartAddress, vecBreakPointBytes.size());
+					FlushInstructionCache(DebugEvent.u.CreateProcessInfo.hProcess, DebugEvent.u.CreateProcessInfo.lpStartAddress, 1);
 
 					// Other stuff
 
 					g_Processes[DebugEvent.dwProcessId] = { DebugEvent.u.CreateProcessInfo.hProcess, DebugEvent.u.CreateProcessInfo.lpStartAddress };
-					g_ProcessesOriginalEntryPointByte[DebugEvent.dwProcessId] = vecBreakPointOriginalBytes;
+					g_ProcessesOriginalEntryPointByte[DebugEvent.dwProcessId] = unOriginalEntryByte;
 					g_Threads[DebugEvent.dwProcessId][DebugEvent.dwThreadId] = { DebugEvent.u.CreateProcessInfo.hThread, DebugEvent.u.CreateProcessInfo.lpStartAddress };
 					g_Modules[DebugEvent.dwProcessId][DebugEvent.u.CreateProcessInfo.lpBaseOfImage] = GetFilePath(DebugEvent.u.CreateProcessInfo.hFile);
 
@@ -2444,11 +2441,11 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 					ContinueStatus = DBG_EXCEPTION_NOT_HANDLED;
 
 					if (bSeenInitialBreakPoint && (DebugEvent.u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_BREAKPOINT) && (DebugEvent.u.Exception.ExceptionRecord.ExceptionAddress == g_Processes[DebugEvent.dwProcessId].second) && (g_ProcessesOriginalEntryPointByte.find(DebugEvent.dwProcessId) != g_ProcessesOriginalEntryPointByte.end())) {
-						if (!WriteProcessMemory(g_Processes[DebugEvent.dwProcessId].first, g_Processes[DebugEvent.dwProcessId].second, g_ProcessesOriginalEntryPointByte[DebugEvent.dwProcessId].data(), g_ProcessesOriginalEntryPointByte[DebugEvent.dwProcessId].size(), nullptr)) {
+						if (!WriteProcessMemory(g_Processes[DebugEvent.dwProcessId].first, g_Processes[DebugEvent.dwProcessId].second, &g_ProcessesOriginalEntryPointByte[DebugEvent.dwProcessId], 1, nullptr)) {
 							break;
 						}
 
-						FlushInstructionCache(g_Processes[DebugEvent.dwProcessId].first, g_Processes[DebugEvent.dwProcessId].second, g_ProcessesOriginalEntryPointByte[DebugEvent.dwProcessId].size());
+						FlushInstructionCache(g_Processes[DebugEvent.dwProcessId].first, g_Processes[DebugEvent.dwProcessId].second, 1);
 
 						CONTEXT ctx {};
 						ctx.ContextFlags = CONTEXT_CONTROL;
