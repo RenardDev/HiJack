@@ -112,27 +112,37 @@ std::unordered_map<DWORD, LPVOID> g_Stub;
 std::unordered_map<DWORD, std::unordered_map<DWORD, LPVOID>> g_TLSReArm;
 
 // [{
-//     PID: [{ CALLBACK ADDRESS: ORIGINAL BYTE }]
+//     PID: [{
+//         CALLBACK ADDRESS: ORIGINAL BYTES
+//     }]
 // }]
 std::unordered_map<DWORD, std::unordered_map<LPVOID, BYTE>> g_TLSOriginalByte;
 
 // [{
-//     PID: [{ CALLBACK ADDRESS: MODULE BASE }]
+//     PID: [{
+//         CALLBACK ADDRESS: MODULE BASE
+//     }]
 // }]
 std::unordered_map<DWORD, std::unordered_map<LPVOID, LPVOID>> g_TLSCallBackOwner;
 
 // [{
-//     PID: [{ ENTRYPOINT_ADDR: ORIGINAL BYTE }]
+//     PID: [{
+//         ENTRYPOINT: ORIGINAL BYTES
+//     }]
 // }]
 std::unordered_map<DWORD, std::unordered_map<LPVOID, BYTE>> g_DLLEntryPointOriginalByte;
 
 // [{
-//     PID: [{ ENTRYPOINT_ADDR: MODULE_BASE }]
+//     PID: [{
+//         ENTRYPOINT: MODULE_BASE
+//     }]
 // }]
 std::unordered_map<DWORD, std::unordered_map<LPVOID, LPVOID>> g_DLLEntryPointOwner;
 
 // [{
-//     PID: [{ TID: ENTRYPOINT_ADDR }]
+//     PID: [{
+//         TID: ENTRYPOINT
+//     }]
 // }]
 std::unordered_map<DWORD, std::unordered_map<DWORD, LPVOID>> g_DLLEntryPointReArm;
 
@@ -2195,21 +2205,21 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 					bool bHandledException = false;
 
 					if (DebugEvent.u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_SINGLE_STEP) {
-						auto itReArm = g_TLSReArm.find(DebugEvent.dwProcessId);
-						if (itReArm != g_TLSReArm.end()) {
-							auto itReArmThread = itReArm->second.find(DebugEvent.dwThreadId);
-							if (itReArmThread != itReArm->second.end()) {
+						auto itTLSReArm = g_TLSReArm.find(DebugEvent.dwProcessId);
+						if (itTLSReArm != g_TLSReArm.end()) {
+							auto itTLSReArmThread = itTLSReArm->second.find(DebugEvent.dwThreadId);
+							if (itTLSReArmThread != itTLSReArm->second.end()) {
 								auto Process = g_Processes[DebugEvent.dwProcessId].first;
-								if (!WriteByte(Process, itReArmThread->second, 0xCC, nullptr)) {
+								if (!WriteByte(Process, itTLSReArmThread->second, 0xCC)) {
 									*pbContinue = false;
 									break;
 								}
 
-								FlushInstructionCache(Process, itReArmThread->second, 1);
+								FlushInstructionCache(Process, itTLSReArmThread->second, 1);
 
-								itReArm->second.erase(itReArmThread);
-								if (itReArm->second.empty()) {
-									g_TLSReArm.erase(itReArm);
+								itTLSReArm->second.erase(itTLSReArmThread);
+								if (itTLSReArm->second.empty()) {
+									g_TLSReArm.erase(itTLSReArm);
 								}
 
 								ContinueStatus = DBG_EXCEPTION_HANDLED;
@@ -2221,17 +2231,17 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 
 						auto itDLLReArm = g_DLLEntryPointReArm.find(DebugEvent.dwProcessId);
 						if (itDLLReArm != g_DLLEntryPointReArm.end()) {
-							auto itThread = itDLLReArm->second.find(DebugEvent.dwThreadId);
-							if (itThread != itDLLReArm->second.end()) {
+							auto itDLLReArmThread = itDLLReArm->second.find(DebugEvent.dwThreadId);
+							if (itDLLReArmThread != itDLLReArm->second.end()) {
 								auto Process = g_Processes[DebugEvent.dwProcessId].first;
-								if (!WriteByte(Process, itThread->second, 0xCC, nullptr)) {
+								if (!WriteByte(Process, itDLLReArmThread->second, 0xCC)) {
 									*pbContinue = false;
 									break;
 								}
 
-								FlushInstructionCache(Process, itThread->second, 1);
+								FlushInstructionCache(Process, itDLLReArmThread->second, 1);
 
-								itDLLReArm->second.erase(itThread);
+								itDLLReArm->second.erase(itDLLReArmThread);
 								if (itDLLReArm->second.empty()) {
 									g_DLLEntryPointReArm.erase(itDLLReArm);
 								}
@@ -2290,7 +2300,7 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 								break;
 							}
 
-							if (!RestoreByte(g_Processes[DebugEvent.dwProcessId].first, pAddress, itBP->second)) {
+							if (!WriteByte(g_Processes[DebugEvent.dwProcessId].first, pAddress, itBP->second)) {
 								*pbContinue = false;
 								break;
 							}
@@ -2383,7 +2393,7 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 							}
 
 
-							if (!RestoreByte(g_Processes[DebugEvent.dwProcessId].first, pAddress, itBP->second)) {
+							if (!WriteByte(g_Processes[DebugEvent.dwProcessId].first, pAddress, itBP->second)) {
 								*pbContinue = false;
 								break;
 							}
