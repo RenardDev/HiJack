@@ -2662,7 +2662,16 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 #endif // _DEBUG
 
 	if (argc < 2) {
+#ifndef _DEBUG
+#ifdef _WIN64
+		_tprintf_s(_T("HiJack [Version " HIJACK_VERSION "]\n\n"));
+#else
+		_tprintf_s(_T("HiJack32 [Version " HIJACK_VERSION "]\n\n"));
+#endif
+#endif // !_DEBUG
+
 		ShowHelp();
+
 		return EXIT_SUCCESS;
 	}
 
