@@ -80,7 +80,7 @@ typedef struct _LOADER_DATA {
 
 // General definitions
 
-#define HIJACK_VERSION "1.8.0"
+#define HIJACK_VERSION "1.8.1"
 
 #define ProcessDebugObjectHandle static_cast<PROCESSINFOCLASS>(0x1E)
 #define ProcessDebugFlags static_cast<PROCESSINFOCLASS>(0x1F)
@@ -207,7 +207,7 @@ bool ReLaunchAsAdmin(bool bAllowCancel = false) {
 	}
 
 	LPCTSTR szCommandLine = GetCommandLine();
-	LPCTSTR szArguments = _tcsstr(szCommandLine, _T(" "));
+	LPCTSTR szArguments = _tcschr(szCommandLine, _T(' '));
 	if (!szArguments) {
 		_tprintf_s(_T("ERROR: _tcsstr\n"));
 		return false;
@@ -279,15 +279,13 @@ tstring_optional GetProcessPath(HANDLE hProcess) {
 			*szDrive = *p;
 
 			if (QueryDosDevice(szDrive, szName, MAX_PATH)) {
-				size_t unNameLength = _tcslen(szName);
+				const size_t unNameLength = _tcslen(szName);
 
-				if (unNameLength < MAX_PATH) {
-					bFound = (_tcsnicmp(szProcessPath, szName, unNameLength) == 0) && (*(szProcessPath + unNameLength) == _T('\\'));
-					if (bFound) {
-						TCHAR szTempFile[MAX_PATH];
-						StringCchPrintf(szTempFile, MAX_PATH, TEXT("%s%s"), szDrive, szProcessPath + unNameLength);
-						StringCchCopyN(szProcessPath, MAX_PATH + 1, szTempFile, _tcslen(szTempFile));
-					}
+				bFound = (_tcsnicmp(szProcessPath, szName, unNameLength) == 0) && (*(szProcessPath + unNameLength) == _T('\\'));
+				if (bFound) {
+					TCHAR szTempFile[MAX_PATH];
+					StringCchPrintf(szTempFile, MAX_PATH, TEXT("%s%s"), szDrive, szProcessPath + unNameLength);
+					StringCchCopyN(szProcessPath, MAX_PATH + 1, szTempFile, _tcslen(szTempFile));
 				}
 			}
 
@@ -388,15 +386,13 @@ tstring_optional GetFilePath(HANDLE hFile) {
 			*szDrive = *p;
 
 			if (QueryDosDevice(szDrive, szName, MAX_PATH)) {
-				size_t unNameLength = _tcslen(szName);
+				const size_t unNameLength = _tcslen(szName);
 
-				if (unNameLength < MAX_PATH) {
-					bFound = (_tcsnicmp(szFilePath, szName, unNameLength) == 0) && (*(szFilePath + unNameLength) == _T('\\'));
-					if (bFound) {
-						TCHAR szTempFile[MAX_PATH];
-						StringCchPrintf(szTempFile, MAX_PATH, TEXT("%s%s"), szDrive, szFilePath + unNameLength);
-						StringCchCopyN(szFilePath, MAX_PATH + 1, szTempFile, _tcslen(szTempFile));
-					}
+				bFound = (_tcsnicmp(szFilePath, szName, unNameLength) == 0) && (*(szFilePath + unNameLength) == _T('\\'));
+				if (bFound) {
+					TCHAR szTempFile[MAX_PATH];
+					StringCchPrintf(szTempFile, MAX_PATH, TEXT("%s%s"), szDrive, szFilePath + unNameLength);
+					StringCchCopyN(szFilePath, MAX_PATH + 1, szTempFile, _tcslen(szTempFile));
 				}
 			}
 
@@ -1109,6 +1105,8 @@ bool GetRemoteModuleHandle(HANDLE hProcess, const TCHAR* szModuleName, HMODULE* 
 		return false;
 	}
 
+	const size_t unModuleNameLength = _tcsclen(szModuleName);
+
 	HMODULE hModules[1024] {};
 	DWORD cbNeeded = 0;
 
@@ -1116,7 +1114,7 @@ bool GetRemoteModuleHandle(HANDLE hProcess, const TCHAR* szModuleName, HMODULE* 
 		for (DWORD i = 0; i < (cbNeeded / sizeof(HMODULE)); ++i) {
 			TCHAR szName[MAX_PATH] {};
 			if (GetModuleFileNameEx(hProcess, hModules[i], szName, MAX_PATH)) {
-				if (_tcsicmp(szName + _tcsclen(szName) - _tcsclen(szModuleName), szModuleName) == 0) {
+				if (_tcsicmp(szName + _tcsclen(szName) - unModuleNameLength, szModuleName) == 0) {
 
 					if (phModule) {
 						*phModule = hModules[i];
@@ -1692,7 +1690,7 @@ void OnUnloadModuleEvent(DWORD unProcessID, DWORD unThreadID, LPVOID pImageBase)
 #endif // _DEBUG
 }
 
-void OnDebugStringEvent(DWORD unProcessID, DWORD unThreadID, const OUTPUT_DEBUG_STRING_INFO& Info) {
+void OnDebugStringEvent(DWORD unProcessID, DWORD unThreadID, const OUTPUT_DEBUG_STRING_INFO Info) {
 #ifdef _DEBUG
 	auto Process = GetDebugProcess(unProcessID);
 	if (!Process) {
@@ -2204,8 +2202,9 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 					if (DebugEvent.u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_SINGLE_STEP) {
 						auto itTLSReArm = g_TLSReArm.find(DebugEvent.dwProcessId);
 						if (itTLSReArm != g_TLSReArm.end()) {
-							auto itTLSReArmThread = itTLSReArm->second.find(DebugEvent.dwThreadId);
-							if (itTLSReArmThread != itTLSReArm->second.end()) {
+							auto& TLSThreadsRecord = itTLSReArm->second;
+							auto itTLSReArmThread = TLSThreadsRecord.find(DebugEvent.dwThreadId);
+							if (itTLSReArmThread != TLSThreadsRecord.end()) {
 								auto Process = g_Processes[DebugEvent.dwProcessId].first;
 								if (!WriteByte(Process, itTLSReArmThread->second, 0xCC)) {
 									*pbContinue = false;
@@ -2214,8 +2213,8 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 
 								FlushInstructionCache(Process, itTLSReArmThread->second, 1);
 
-								itTLSReArm->second.erase(itTLSReArmThread);
-								if (itTLSReArm->second.empty()) {
+								TLSThreadsRecord.erase(itTLSReArmThread);
+								if (TLSThreadsRecord.empty()) {
 									g_TLSReArm.erase(itTLSReArm);
 								}
 
@@ -2228,8 +2227,9 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 
 						auto itDLLReArm = g_DLLEntryPointReArm.find(DebugEvent.dwProcessId);
 						if (itDLLReArm != g_DLLEntryPointReArm.end()) {
-							auto itDLLReArmThread = itDLLReArm->second.find(DebugEvent.dwThreadId);
-							if (itDLLReArmThread != itDLLReArm->second.end()) {
+							auto& DLLThreadsRecord = itDLLReArm->second;
+							auto itDLLReArmThread = DLLThreadsRecord.find(DebugEvent.dwThreadId);
+							if (itDLLReArmThread != DLLThreadsRecord.end()) {
 								auto Process = g_Processes[DebugEvent.dwProcessId].first;
 								if (!WriteByte(Process, itDLLReArmThread->second, 0xCC)) {
 									*pbContinue = false;
@@ -2238,8 +2238,8 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 
 								FlushInstructionCache(Process, itDLLReArmThread->second, 1);
 
-								itDLLReArm->second.erase(itDLLReArmThread);
-								if (itDLLReArm->second.empty()) {
+								DLLThreadsRecord.erase(itDLLReArmThread);
+								if (DLLThreadsRecord.empty()) {
 									g_DLLEntryPointReArm.erase(itDLLReArm);
 								}
 
@@ -2856,15 +2856,13 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 			return EXIT_FAILURE;
 		}
 
-		if (hJob && (hJob != INVALID_HANDLE_VALUE)) {
-			if (!AssignProcessToJobObject(hJob, pi.hProcess)) {
-				_tprintf_s(_T("ERROR: AssignProcessToJobObject (Error = 0x%08X)\n"), GetLastError());
-				TerminateProcess(pi.hProcess, 0);
-				CloseHandle(pi.hThread);
-				CloseHandle(pi.hProcess);
-				CloseHandle(hJob);
-				return EXIT_FAILURE;
-			}
+		if (!AssignProcessToJobObject(hJob, pi.hProcess)) {
+			_tprintf_s(_T("ERROR: AssignProcessToJobObject (Error = 0x%08X)\n"), GetLastError());
+			TerminateProcess(pi.hProcess, 0);
+			CloseHandle(pi.hThread);
+			CloseHandle(pi.hProcess);
+			CloseHandle(hJob);
+			return EXIT_FAILURE;
 		}
 
 		if (WaitForSingleObject(pi.hProcess, INFINITE) != WAIT_OBJECT_0) {

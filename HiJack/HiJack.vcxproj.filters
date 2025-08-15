@@ -27,4 +27,7 @@
       <Filter>Файлы заголовков</Filter>
     </ClInclude>
   </ItemGroup>
+  <ItemGroup>
+    <None Include="HiJack.suppress" />
+  </ItemGroup>
 </Project>

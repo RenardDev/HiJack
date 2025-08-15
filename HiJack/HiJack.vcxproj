@@ -175,6 +175,9 @@
   <ItemGroup>
     <ClInclude Include="Detours.h" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="HiJack.suppress" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>

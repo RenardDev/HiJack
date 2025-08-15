@@ -1,0 +1,284 @@
+<?xml version="1.0" standalone="yes"?>
+<NewDataSet>
+  <xs:schema id="NewDataSet" xmlns="" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:msdata="urn:schemas-microsoft-com:xml-msdata">
+    <xs:element name="NewDataSet" msdata:IsDataSet="true" msdata:UseCurrentLocale="true">
+      <xs:complexType>
+        <xs:choice minOccurs="0" maxOccurs="unbounded">
+          <xs:element name="SuppressVersion">
+            <xs:complexType>
+              <xs:sequence>
+                <xs:element name="CurrentVersion" type="xs:int" minOccurs="0" />
+                <xs:element name="IsPrimary" type="xs:boolean" minOccurs="0" />
+              </xs:sequence>
+            </xs:complexType>
+          </xs:element>
+          <xs:element name="HiJack" msdata:CaseSensitive="False">
+            <xs:complexType>
+              <xs:sequence>
+                <xs:element name="FileName" type="xs:string" default="" />
+                <xs:element name="ErrorCode" type="xs:string" default="" />
+                <xs:element name="Message" type="xs:string" default="" />
+                <xs:element name="CodePrev" type="xs:unsignedInt" default="0" />
+                <xs:element name="CodeCurrent" type="xs:unsignedInt" default="0" />
+                <xs:element name="CodeNext" type="xs:unsignedInt" default="0" />
+              </xs:sequence>
+            </xs:complexType>
+          </xs:element>
+        </xs:choice>
+      </xs:complexType>
+      <xs:unique name="Constraint1" msdata:PrimaryKey="true">
+        <xs:selector xpath=".//HiJack" />
+        <xs:field xpath="FileName" />
+        <xs:field xpath="ErrorCode" />
+        <xs:field xpath="Message" />
+        <xs:field xpath="CodePrev" />
+        <xs:field xpath="CodeCurrent" />
+        <xs:field xpath="CodeNext" />
+      </xs:unique>
+    </xs:element>
+  </xs:schema>
+  <SuppressVersion>
+    <CurrentVersion>3</CurrentVersion>
+    <IsPrimary>false</IsPrimary>
+  </SuppressVersion>
+  <HiJack>
+    <FileName>Detours.cpp</FileName>
+    <ErrorCode>V1037</ErrorCode>
+    <Message>Two or more case-branches perform the same actions. Check lines: _, _</Message>
+    <CodePrev>9087866</CodePrev>
+    <CodeCurrent>22499</CodeCurrent>
+    <CodeNext>9087854</CodeNext>
+  </HiJack>
+  <HiJack>
+    <FileName>Detours.cpp</FileName>
+    <ErrorCode>V1037</ErrorCode>
+    <Message>Two or more case-branches perform the same actions. Check lines: _, _</Message>
+    <CodePrev>284318</CodePrev>
+    <CodeCurrent>373959</CodeCurrent>
+    <CodeNext>2337</CodeNext>
+  </HiJack>
+  <HiJack>
+    <FileName>Detours.cpp</FileName>
+    <ErrorCode>V1037</ErrorCode>
+    <Message>Two or more case-branches perform the same actions. Check lines: _, _</Message>
+    <CodePrev>568552</CodePrev>
+    <CodeCurrent>1531219687</CodeCurrent>
+    <CodeNext>2337</CodeNext>
+  </HiJack>
+  <HiJack>
+    <FileName>Detours.cpp</FileName>
+    <ErrorCode>V1037</ErrorCode>
+    <Message>Two or more case-branches perform the same actions. Check lines: _, _, _</Message>
+    <CodePrev>284188</CodePrev>
+    <CodeCurrent>1531219815</CodeCurrent>
+    <CodeNext>2337</CodeNext>
+  </HiJack>
+  <HiJack>
+    <FileName>Detours.cpp</FileName>
+    <ErrorCode>V1037</ErrorCode>
+    <Message>Two or more case-branches perform the same actions. Check lines: _, _, _</Message>
+    <CodePrev>284176</CodePrev>
+    <CodeCurrent>1531219879</CodeCurrent>
+    <CodeNext>2337</CodeNext>
+  </HiJack>
+  <HiJack>
+    <FileName>Detours.cpp</FileName>
+    <ErrorCode>V1037</ErrorCode>
+    <Message>Two or more case-branches perform the same actions. Check lines: _, _, _</Message>
+    <CodePrev>284214</CodePrev>
+    <CodeCurrent>1531219879</CodeCurrent>
+    <CodeNext>2337</CodeNext>
+  </HiJack>
+  <HiJack>
+    <FileName>Detours.cpp</FileName>
+    <ErrorCode>V1037</ErrorCode>
+    <Message>Two or more case-branches perform the same actions. Check lines: _, _</Message>
+    <CodePrev>568458</CodePrev>
+    <CodeCurrent>1829909734</CodeCurrent>
+    <CodeNext>2337</CodeNext>
+  </HiJack>
+  <HiJack>
+    <FileName>Detours.cpp</FileName>
+    <ErrorCode>V1037</ErrorCode>
+    <Message>Two or more case-branches perform the same actions. Check lines: _, _, _</Message>
+    <CodePrev>568423</CodePrev>
+    <CodeCurrent>2086950260</CodeCurrent>
+    <CodeNext>2331398756</CodeNext>
+  </HiJack>
+  <HiJack>
+    <FileName>Detours.cpp</FileName>
+    <ErrorCode>V1037</ErrorCode>
+    <Message>Two or more case-branches perform the same actions. Check lines: _, _</Message>
+    <CodePrev>568556</CodePrev>
+    <CodeCurrent>3062438247</CodeCurrent>
+    <CodeNext>2337</CodeNext>
+  </HiJack>
+  <HiJack>
+    <FileName>Detours.cpp</FileName>
+    <ErrorCode>V513</ErrorCode>
+    <Message>Use _beginthreadex/_endthreadex functions instead of CreateThread/ExitThread functions.</Message>
+    <CodePrev>0</CodePrev>
+    <CodeCurrent>3147281295</CodeCurrent>
+    <CodeNext>2048798809</CodeNext>
+  </HiJack>
+  <HiJack>
+    <FileName>Detours.cpp</FileName>
+    <ErrorCode>V525</ErrorCode>
+    <Message>The code contains the collection of similar blocks. Check items 'dr_', 'dr_', 'dr_' in lines _, _, _.</Message>
+    <CodePrev>3441387013</CodePrev>
+    <CodeCurrent>328455</CodeCurrent>
+    <CodeNext>329703</CodeNext>
+  </HiJack>
+  <HiJack>
+    <FileName>Detours.cpp</FileName>
+    <ErrorCode>V525</ErrorCode>
+    <Message>The code contains the collection of similar blocks. Check items 'dr_', 'dr_', 'dr_' in lines _, _, _.</Message>
+    <CodePrev>3441387015</CodePrev>
+    <CodeCurrent>328463</CodeCurrent>
+    <CodeNext>329711</CodeNext>
+  </HiJack>
+  <HiJack>
+    <FileName>Detours.cpp</FileName>
+    <ErrorCode>V525</ErrorCode>
+    <Message>The code contains the collection of similar blocks. Check items 'dr_', 'dr_', 'dr_' in lines _, _, _.</Message>
+    <CodePrev>3441387009</CodePrev>
+    <CodeCurrent>328471</CodeCurrent>
+    <CodeNext>329719</CodeNext>
+  </HiJack>
+  <HiJack>
+    <FileName>Detours.cpp</FileName>
+    <ErrorCode>V525</ErrorCode>
+    <Message>The code contains the collection of similar blocks. Check items 'dr_', 'dr_', 'dr_' in lines _, _, _.</Message>
+    <CodePrev>3441387011</CodePrev>
+    <CodeCurrent>328479</CodeCurrent>
+    <CodeNext>329727</CodeNext>
+  </HiJack>
+  <HiJack>
+    <FileName>Detours.cpp</FileName>
+    <ErrorCode>V547</ErrorCode>
+    <Message>Expression is always false.</Message>
+    <CodePrev>3635870858</CodePrev>
+    <CodeCurrent>1957131926</CodeCurrent>
+    <CodeNext>3472534580</CodeNext>
+  </HiJack>
+  <HiJack>
+    <FileName>Detours.cpp</FileName>
+    <ErrorCode>V616</ErrorCode>
+    <Message>The '(RD_OPT_A)' named constant with the value of _ is used in the bitwise operation.</Message>
+    <CodePrev>227</CodePrev>
+    <CodeCurrent>3424005310</CodeCurrent>
+    <CodeNext>3168682899</CodeNext>
+  </HiJack>
+  <HiJack>
+    <FileName>Detours.cpp</FileName>
+    <ErrorCode>V616</ErrorCode>
+    <Message>The '(RD_OPT_A)' named constant with the value of _ is used in the bitwise operation.</Message>
+    <CodePrev>227</CodePrev>
+    <CodeCurrent>3424005310</CodeCurrent>
+    <CodeNext>3731828376</CodeNext>
+  </HiJack>
+  <HiJack>
+    <FileName>Detours.cpp</FileName>
+    <ErrorCode>V720</ErrorCode>
+    <Message>It is advised to utilize the 'SuspendThread' function only when developing a debugger (see documentation for details).</Message>
+    <CodePrev>0</CodePrev>
+    <CodeCurrent>3676679972</CodeCurrent>
+    <CodeNext>176909</CodeNext>
+  </HiJack>
+  <HiJack>
+    <FileName>Detours.cpp</FileName>
+    <ErrorCode>V720</ErrorCode>
+    <Message>It is advised to utilize the 'SuspendThread' function only when developing a debugger (see documentation for details).</Message>
+    <CodePrev>1723405808</CodePrev>
+    <CodeCurrent>3752072768</CodeCurrent>
+    <CodeNext>17733</CodeNext>
+  </HiJack>
+  <HiJack>
+    <FileName>Detours.cpp</FileName>
+    <ErrorCode>V773</ErrorCode>
+    <Message>The function was exited without releasing the 'hThread' handle. A resource leak is possible.</Message>
+    <CodePrev>91556817</CodePrev>
+    <CodeCurrent>88117</CodeCurrent>
+    <CodeNext>125</CodeNext>
+  </HiJack>
+  <HiJack>
+    <FileName>Detours.cpp</FileName>
+    <ErrorCode>V773</ErrorCode>
+    <Message>The function was exited without releasing the 'hThread' handle. A resource leak is possible.</Message>
+    <CodePrev>91556817</CodePrev>
+    <CodeCurrent>176909</CodeCurrent>
+    <CodeNext>125</CodeNext>
+  </HiJack>
+  <HiJack>
+    <FileName>Detours.cpp</FileName>
+    <ErrorCode>V807</ErrorCode>
+    <Message>Decreased performance. Consider creating a reference to avoid using the 'pRecord-&gt;m_PendingRestoreThreads' expression repeatedly.</Message>
+    <CodePrev>0</CodePrev>
+    <CodeCurrent>3443777762</CodeCurrent>
+    <CodeNext>2973134912</CodeNext>
+  </HiJack>
+  <HiJack>
+    <FileName>Detours.cpp</FileName>
+    <ErrorCode>V835</ErrorCode>
+    <Message>Passing cheap-to-copy argument by reference may lead to decreased performance. To avoid this, pass the second argument by value.</Message>
+    <CodePrev>0</CodePrev>
+    <CodeCurrent>1128594287</CodeCurrent>
+    <CodeNext>49736095</CodeNext>
+  </HiJack>
+  <HiJack>
+    <FileName>Detours.h</FileName>
+    <ErrorCode>V802</ErrorCode>
+    <Message>On _-bit platform, structure size can be reduced from _ to _ bytes by rearranging the fields according to their sizes in decreasing order.</Message>
+    <CodePrev>0</CodePrev>
+    <CodeCurrent>1550727875</CodeCurrent>
+    <CodeNext>54873497</CodeNext>
+  </HiJack>
+  <HiJack>
+    <FileName>Detours.h</FileName>
+    <ErrorCode>V802</ErrorCode>
+    <Message>On _-bit platform, structure size can be reduced from _ to _ bytes by rearranging the fields according to their sizes in decreasing order.</Message>
+    <CodePrev>0</CodePrev>
+    <CodeCurrent>1907918976</CodeCurrent>
+    <CodeNext>225475</CodeNext>
+  </HiJack>
+  <HiJack>
+    <FileName>Detours.h</FileName>
+    <ErrorCode>V802</ErrorCode>
+    <Message>On _-bit platform, structure size can be reduced from _ to _ bytes by rearranging the fields according to their sizes in decreasing order.</Message>
+    <CodePrev>0</CodePrev>
+    <CodeCurrent>3815906779</CodeCurrent>
+    <CodeNext>14801337</CodeNext>
+  </HiJack>
+  <HiJack>
+    <FileName>HiJack.cpp</FileName>
+    <ErrorCode>V720</ErrorCode>
+    <Message>It is advised to utilize the 'SuspendThread' function only when developing a debugger (see documentation for details).</Message>
+    <CodePrev>0</CodePrev>
+    <CodeCurrent>2855993132</CodeCurrent>
+    <CodeNext>2007721528</CodeNext>
+  </HiJack>
+  <HiJack>
+    <FileName>HiJack.cpp</FileName>
+    <ErrorCode>V720</ErrorCode>
+    <Message>It is advised to utilize the 'SuspendThread' function only when developing a debugger (see documentation for details).</Message>
+    <CodePrev>0</CodePrev>
+    <CodeCurrent>3813584618</CodeCurrent>
+    <CodeNext>3008974231</CodeNext>
+  </HiJack>
+  <HiJack>
+    <FileName>HiJack.cpp</FileName>
+    <ErrorCode>V720</ErrorCode>
+    <Message>It is advised to utilize the 'SuspendThread' function only when developing a debugger (see documentation for details).</Message>
+    <CodePrev>0</CodePrev>
+    <CodeCurrent>4264914612</CodeCurrent>
+    <CodeNext>3151039619</CodeNext>
+  </HiJack>
+  <HiJack>
+    <FileName>HiJack.cpp</FileName>
+    <ErrorCode>V820</ErrorCode>
+    <Message>The 'ModuleName' variable is not used after copying. Copying can be replaced with move/swap for optimization.</Message>
+    <CodePrev>0</CodePrev>
+    <CodeCurrent>3257793849</CodeCurrent>
+    <CodeNext>2041368055</CodeNext>
+  </HiJack>
+</NewDataSet>

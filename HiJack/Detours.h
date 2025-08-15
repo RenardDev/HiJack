@@ -12,7 +12,6 @@
 #include <TlHelp32.h>
 
 // Advanced
-#define USE_SOFT_INTRINSICS
 #include <intrin.h>
 #include <mmintrin.h>  // MMX
 #include <xmmintrin.h> // SSE
@@ -796,19 +795,6 @@ namespace Detours {
 	} KUSER_SHARED_DATA, *PKUSER_SHARED_DATA;
 
 	extern const volatile KUSER_SHARED_DATA& KUserSharedData;
-
-	// ----------------------------------------------------------------
-	// KHYPERVISOR_SHARED_DATA
-	// ----------------------------------------------------------------
-
-	typedef struct _KHYPERVISOR_SHARED_DATA {
-		ULONG Present;
-		ULONG Reserved1;
-		ULONGLONG MultiplierValue;
-		ULONGLONG AdditionalOffset;
-	} KHYPERVISOR_SHARED_DATA, *PKHYPERVISOR_SHARED_DATA;
-
-	extern const volatile KHYPERVISOR_SHARED_DATA& KHypervisorSharedData;
 
 	// ----------------------------------------------------------------
 	// LDR
@@ -5574,27 +5560,61 @@ namespace Detours {
 	namespace Hook {
 
 		// ----------------------------------------------------------------
-		// Memory Hook Operation (Experimental!!!)
+		// Hardware Hook Register
 		// ----------------------------------------------------------------
 
-		//typedef enum _MEMORY_HOOK_OPERATION : unsigned char {
-		//	MEMORY_READ    = 0,
-		//	MEMORY_WRITE   = 1,
-		//	MEMORY_EXECUTE = 2
-		//} MEMORY_HOOK_OPERATION, *PMEMORY_HOOK_OPERATION;
+		typedef enum _HARDWARE_HOOK_REGISTER : unsigned char {
+			REGISTER_DR0 = 0,
+			REGISTER_DR1 = 1,
+			REGISTER_DR2 = 2,
+			REGISTER_DR3 = 3
+		} HARDWARE_HOOK_REGISTER, *PHARDWARE_HOOK_REGISTER;
+
+		// ----------------------------------------------------------------
+		// Hardware Hook Type
+		// ----------------------------------------------------------------
+
+		typedef enum _HARDWARE_HOOK_TYPE : unsigned char {
+			TYPE_EXECUTE = 0,
+			TYPE_WRITE   = 1,
+			TYPE_ACCESS  = 3
+		} HARDWARE_HOOK_TYPE, *PHARDWARE_HOOK_TYPE;
+
+		// ----------------------------------------------------------------
+		// Hardware Hook CallBack
+		// ----------------------------------------------------------------
+
+		using fnHardwareHookCallBack = void(*)(const PCONTEXT pCTX);
+
+		// ----------------------------------------------------------------
+		// Hardware Hook
+		// ----------------------------------------------------------------
+
+		bool HookHardware(DWORD unThreadID, HARDWARE_HOOK_REGISTER unRegister, const fnHardwareHookCallBack pCallBack, void* pAddress, HARDWARE_HOOK_TYPE unType, unsigned char unSize = 1);
+		bool UnHookHardware(DWORD unThreadID, HARDWARE_HOOK_REGISTER unRegister);
+
+		// ----------------------------------------------------------------
+		// Memory Hook Operation
+		// ----------------------------------------------------------------
+
+		typedef enum _MEMORY_HOOK_OPERATION : unsigned char {
+			MEMORY_READ    = 0,
+			MEMORY_WRITE   = 1,
+			MEMORY_EXECUTE = 2
+		} MEMORY_HOOK_OPERATION, *PMEMORY_HOOK_OPERATION;
 
 		// ----------------------------------------------------------------
 		// Memory Hook CallBack
 		// ----------------------------------------------------------------
 
-		//using fnMemoryHookCallBack = bool(*)(const PCONTEXT pCTX, const void* pExceptionAddress, MEMORY_HOOK_OPERATION unOperation, const void* pHookAddress, const void* pAccessAddress, void** pNewAccessAddress);
+		using fnMemoryHookCallBack = void(*)(const PCONTEXT pCTX, const void* pExceptionAddress, MEMORY_HOOK_OPERATION unOperation, const void* pAddress, const void* pAccessAddress);
 
 		// ----------------------------------------------------------------
 		// Memory Hook
 		// ----------------------------------------------------------------
 
-		//bool HookMemory(const fnMemoryHookCallBack pCallBack, void* pAddress, size_t unSize, bool bAllowVirtualAddress = false);
-		//bool UnHookMemory(const fnMemoryHookCallBack pCallBack);
+		bool HookMemory(const fnMemoryHookCallBack pCallBack, void* pAddress, size_t unSize);
+		bool UnHookMemory(const fnMemoryHookCallBack pCallBack);
 
 		// ----------------------------------------------------------------
 		// Interrupt Hook CallBack
