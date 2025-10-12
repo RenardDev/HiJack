@@ -80,7 +80,7 @@ typedef struct _LOADER_DATA {
 
 // General definitions
 
-#define HIJACK_VERSION "1.8.1"
+#define HIJACK_VERSION "1.8.2"
 
 #define ProcessDebugObjectHandle static_cast<PROCESSINFOCLASS>(0x1E)
 #define ProcessDebugFlags static_cast<PROCESSINFOCLASS>(0x1F)
