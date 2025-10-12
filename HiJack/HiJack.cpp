@@ -1892,6 +1892,7 @@ void OnEntryPoint(DWORD unProcessID, DWORD unThreadID) {
 
 	DWORD dwAttrib = GetFileAttributes(ProcessHiJackLibraryPath.c_str());
 	if (!((dwAttrib != INVALID_FILE_ATTRIBUTES) && !(dwAttrib & FILE_ATTRIBUTE_DIRECTORY))) { // File not exist
+		RestoreAllProcessBreakPoints(unProcessID);
 		g_bContinueDebugging = false;
 		return;
 	}
