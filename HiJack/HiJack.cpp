@@ -84,7 +84,10 @@ typedef struct _LOADER_DATA {
 
 #define ProcessDebugObjectHandle static_cast<PROCESSINFOCLASS>(0x1E)
 #define ProcessDebugFlags static_cast<PROCESSINFOCLASS>(0x1F)
-#define SafeCloseHandle(x) if ((x) && (x != INVALID_HANDLE_VALUE)) { CloseHandle(x); }
+#define SafeCloseHandle(x)                    \
+	if ((x) && (x != INVALID_HANDLE_VALUE)) { \
+		CloseHandle(x);                       \
+	}
 #define FileStandardInformation static_cast<FILE_INFORMATION_CLASS>(5)
 
 EXTERN_C NTSYSCALLAPI NTSTATUS NTAPI NtFlushInstructionCache(HANDLE ProcessHandle, PVOID BaseAddress, ULONG NumberOfBytesToFlush);
@@ -876,7 +879,7 @@ bool WriteByte(HANDLE hProcess, LPVOID pAddress, BYTE unValue, BYTE* pPreviousBy
 
 		return false;
 	}
-	
+
 	FlushInstructionCache(hProcess, pAddress, 1);
 
 	DWORD unDummy = 0;
@@ -1129,7 +1132,7 @@ bool GetRemoteModuleHandle(HANDLE hProcess, const TCHAR* szModuleName, HMODULE* 
 	return false;
 }
 
-template<typename T>
+template <typename T>
 bool GetRemoteProcAddress(HANDLE hProcess, const TCHAR* szModuleName, const char* szProcName, T* pFunc) {
 	if (!hProcess || (hProcess == INVALID_HANDLE_VALUE) || !szModuleName || !szProcName) {
 		return false;
@@ -1290,7 +1293,7 @@ DEFINE_CODE_IN_SECTION(".load") bool MapImage(PLOADER_DATA pLD) {
 		}
 	}
 
-	SIZE_T unSize = 0;
+	SIZE_T unSize = pNTHs->OptionalHeader.SizeOfImage;
 	pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
 	pLD->m_pImageAddress = pDesiredBase;
 
@@ -1450,7 +1453,7 @@ DEFINE_CODE_IN_SECTION(".load") bool ResolveImports(PLOADER_DATA pLD) {
 
 		HMODULE hModule = nullptr;
 		if (!NT_SUCCESS(pLD->m_pLdrLoadDll(NULL, 0, &NTModule, reinterpret_cast<PHANDLE>(&hModule)))) {
-		//if (!NT_SUCCESS(pLD->m_pLdrGetDllHandle(NULL, 0, &NTModule, reinterpret_cast<PHANDLE>(&hModule)))) {
+			//if (!NT_SUCCESS(pLD->m_pLdrGetDllHandle(NULL, 0, &NTModule, reinterpret_cast<PHANDLE>(&hModule)))) {
 			pLD->m_pRtlFreeUnicodeString(&NTModule);
 			return false;
 		}
@@ -1558,7 +1561,10 @@ DEFINE_CODE_IN_SECTION(".load") bool CallDllMain(PLOADER_DATA pLD, DWORD unReaso
 }
 
 DEFINE_DATA_IN_SECTION(".load") LOADER_DATA LoaderData;
-DEFINE_CODE_IN_SECTION(".load") DWORD WINAPI Loader(LPVOID lpParameter) { SELF_INCLUDE;
+
+DEFINE_CODE_IN_SECTION(".load") DWORD WINAPI Loader(LPVOID lpParameter) {
+	SELF_INCLUDE;
+
 	PLOADER_DATA pLD = reinterpret_cast<PLOADER_DATA>(lpParameter);
 	if (!pLD) {
 		return EXIT_FAILURE;
@@ -1835,7 +1841,7 @@ bool OnDLLEntryPoint(DWORD unProcessID, DWORD unThreadID, LPVOID pEntryPoint, LP
 	if (g_bGlobalDisableThreadLibraryCalls && ((unReason == 2) || (unReason == 3))) {
 		LPVOID pStub = EnsureStub(unProcessID, Process);
 		if (pStub) {
-			CONTEXT ctx{};
+			CONTEXT ctx {};
 			ctx.ContextFlags = CONTEXT_CONTROL;
 			if (GetThreadContext(Thread, &ctx)) {
 #ifdef _WIN64
@@ -2352,7 +2358,7 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 						if (itBP != itDLLOriginalByte->second.end()) {
 
 							DWORD unReason = 0xFFFFFFFF;
-							CONTEXT ctx{};
+							CONTEXT ctx {};
 
 #ifdef _WIN64
 							ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
@@ -2389,7 +2395,6 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 								OnExceptionEvent(DebugEvent.dwProcessId, DebugEvent.dwThreadId, DebugEvent.u.Exception, false, &bHandledException);
 								break;
 							}
-
 
 							if (!WriteByte(g_Processes[DebugEvent.dwProcessId].first, pAddress, itBP->second)) {
 								*pbContinue = false;
@@ -2796,7 +2801,7 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 		return EXIT_FAILURE;
 	}
 
-	JOBOBJECT_EXTENDED_LIMIT_INFORMATION joli{};
+	JOBOBJECT_EXTENDED_LIMIT_INFORMATION joli {};
 	joli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
 	if (!SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, &joli, sizeof(joli))) {
 		_tprintf_s(_T("ERROR: SetInformationJobObject (Error = 0x%08X)\n"), GetLastError());
