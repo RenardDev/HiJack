@@ -1,5 +1,5 @@
 # HiJack
-A utility leveraging Windows mechanisms to intercept process creation by registering a debugger in the system registry.
+A utility leveraging Windows 10+ mechanisms to intercept process creation by registering a debugger in the system registry.
 
 # Commands
 ```

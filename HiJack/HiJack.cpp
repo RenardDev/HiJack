@@ -176,6 +176,11 @@ std::unordered_map<DWORD, std::unordered_map<LPVOID, tstring_optional>> g_Module
 std::unordered_map<DWORD, HANDLE> g_ProcessSuspendedMainThreads;
 
 // [{
+//     PID: (BASE ADDRESS, SIZE)
+// }]
+std::unordered_map<DWORD, std::pair<LPVOID, size_t>> g_RemoteLoaderSection;
+
+// [{
 //     PID: [
 //         HANDLE
 //     ]
@@ -200,6 +205,7 @@ bool IsRunningAsAdmin() {
 		return false;
 	}
 
+	FreeSid(AdministratorsGroup);
 	return bIsAdmin;
 }
 
@@ -1293,8 +1299,8 @@ DEFINE_CODE_IN_SECTION(".load") bool MapImage(PLOADER_DATA pLD) {
 		}
 	}
 
-	SIZE_T unSize = pNTHs->OptionalHeader.SizeOfImage;
-	pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
+	SIZE_T unZero = 0;
+	pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unZero, MEM_RELEASE);
 	pLD->m_pImageAddress = pDesiredBase;
 
 	return true;
@@ -1460,7 +1466,7 @@ DEFINE_CODE_IN_SECTION(".load") bool ResolveImports(PLOADER_DATA pLD) {
 
 		pLD->m_pRtlFreeUnicodeString(&NTModule);
 
-		PIMAGE_THUNK_DATA pThunk = reinterpret_cast<PIMAGE_THUNK_DATA>(reinterpret_cast<char*>(pDH) + pImportDescriptor->OriginalFirstThunk);
+		PIMAGE_THUNK_DATA pThunk = (pImportDescriptor->OriginalFirstThunk != 0) ? reinterpret_cast<PIMAGE_THUNK_DATA>(reinterpret_cast<char*>(pDH) + pImportDescriptor->OriginalFirstThunk) : reinterpret_cast<PIMAGE_THUNK_DATA>(reinterpret_cast<char*>(pDH) + pImportDescriptor->FirstThunk);
 		PIMAGE_THUNK_DATA pIAT = reinterpret_cast<PIMAGE_THUNK_DATA>(reinterpret_cast<char*>(pDH) + pImportDescriptor->FirstThunk);
 		while (pThunk->u1.AddressOfData) {
 			if (pThunk->u1.Ordinal & IMAGE_ORDINAL_FLAG) {
@@ -1489,6 +1495,7 @@ DEFINE_CODE_IN_SECTION(".load") bool ResolveImports(PLOADER_DATA pLD) {
 
 		++pImportDescriptor;
 	}
+
 	return true;
 }
 
@@ -1522,6 +1529,7 @@ DEFINE_CODE_IN_SECTION(".load") bool ProtectSections(PLOADER_DATA pLD) {
 			pLD->m_pNtFlushInstructionCache(reinterpret_cast<HANDLE>(-1), nullptr, 0);
 		}
 	}
+
 	return true;
 }
 
@@ -1645,6 +1653,16 @@ void OnExitThreadEvent(DWORD unProcessID, DWORD unThreadID, DWORD unExitCode) {
 
 				g_bGlobalDisableThreadLibraryCalls = false;
 				g_bContinueDebugging = false;
+			}
+
+			auto sit = g_RemoteLoaderSection.find(unProcessID);
+			if (sit != g_RemoteLoaderSection.end()) {
+				auto Process = GetDebugProcess(unProcessID);
+				if (Process) {
+					VirtualFreeEx(Process, sit->second.first, 0, MEM_RELEASE);
+				}
+
+				g_RemoteLoaderSection.erase(sit);
 			}
 
 			ResumeThread(g_ProcessSuspendedMainThreads[unProcessID]);
@@ -2033,6 +2051,8 @@ void OnEntryPoint(DWORD unProcessID, DWORD unThreadID) {
 		return;
 	}
 
+	g_RemoteLoaderSection[unProcessID] = { pRemoteSection, unSectionSize };
+
 	SIZE_T unWritten = 0;
 	if (!WriteProcessMemory(Process, pRemoteSection, pSection, unSectionSize, &unWritten) || (unWritten != unSectionSize)) {
 		VirtualFreeEx(Process, pRemoteSection, 0, MEM_RELEASE);
@@ -2127,13 +2147,46 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 				case EXIT_PROCESS_DEBUG_EVENT:
 					OnExitProcessEvent(DebugEvent.dwProcessId, DebugEvent.u.ExitProcess.dwExitCode);
 
+					{
+						auto sit = g_RemoteLoaderSection.find(DebugEvent.dwProcessId);
+						if (sit != g_RemoteLoaderSection.end()) {
+							g_RemoteLoaderSection.erase(sit);
+						}
+					}
+
 					g_ProcessSuspendedMainThreads.erase(DebugEvent.dwProcessId);
-					g_ProcessInjectionThreads.erase(DebugEvent.dwProcessId);
+
+					{
+						auto iit = g_ProcessInjectionThreads.find(DebugEvent.dwProcessId);
+						if (iit != g_ProcessInjectionThreads.end()) {
+							SafeCloseHandle(iit->second);
+							g_ProcessInjectionThreads.erase(iit);
+						}
+					}
 
 					g_Modules.erase(DebugEvent.dwProcessId);
-					g_Threads.erase(DebugEvent.dwProcessId);
+
+					{
+						auto tit = g_Threads.find(DebugEvent.dwProcessId);
+						if (tit != g_Threads.end()) {
+							for (auto& kv : tit->second) {
+								SafeCloseHandle(kv.second.first);
+							}
+
+							g_Threads.erase(tit);
+						}
+					}
+
 					g_ProcessesOriginalEntryPointByte.erase(DebugEvent.dwProcessId);
-					g_Processes.erase(DebugEvent.dwProcessId);
+
+					{
+						auto pit = g_Processes.find(DebugEvent.dwProcessId);
+						if (pit != g_Processes.end()) {
+							SafeCloseHandle(pit->second.first);
+							g_Processes.erase(pit);
+						}
+					}
+
 					g_DLLEntryPointOwner.erase(DebugEvent.dwProcessId);
 					g_DLLEntryPointOriginalByte.erase(DebugEvent.dwProcessId);
 					g_DLLEntryPointReArm.erase(DebugEvent.dwProcessId);
@@ -2157,9 +2210,17 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 				case EXIT_THREAD_DEBUG_EVENT:
 					OnExitThreadEvent(DebugEvent.dwProcessId, DebugEvent.dwThreadId, DebugEvent.u.ExitThread.dwExitCode);
 
-					g_Threads[DebugEvent.dwProcessId].erase(DebugEvent.dwThreadId);
-					if (g_Threads[DebugEvent.dwProcessId].empty()) {
-						g_Threads.erase(DebugEvent.dwProcessId);
+					{
+						auto pit = g_Threads.find(DebugEvent.dwProcessId);
+						if (pit != g_Threads.end()) {
+							auto tit = pit->second.find(DebugEvent.dwThreadId);
+							if (tit != pit->second.end()) {
+								SafeCloseHandle(tit->second.first);
+								pit->second.erase(tit);
+							}
+							if (pit->second.empty())
+								g_Threads.erase(pit);
+						}
 					}
 
 					g_TLSReArm[DebugEvent.dwProcessId].erase(DebugEvent.dwThreadId);
@@ -2578,10 +2639,16 @@ bool HiJackAdd(const TCHAR* szFileName) {
 	if (RegSetValueEx(hKey, _T("Debugger"), 0, REG_SZ, reinterpret_cast<const BYTE*>(as.Buffer), as.Length + 1) != ERROR_SUCCESS) {
 #endif
 		_tprintf_s(_T("ERROR: RegSetValueEx (Error = 0x%08X)\n"), GetLastError());
+#ifndef _UNICODE
+		RtlFreeAnsiString(&as);
+#endif
 		RegCloseKey(hKey);
 		return false;
 	}
 
+#ifndef _UNICODE
+	RtlFreeAnsiString(&as);
+#endif
 	RegCloseKey(hKey);
 	return true;
 }
@@ -2843,9 +2910,16 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 #endif
 		if (err != 0) {
 			_tprintf_s(_T("ERROR: _tsplitpath_s (Error = %i)\n"), err);
+#ifndef _UNICODE
+			RtlFreeAnsiString(&as);
+#endif
 			CloseHandle(hJob);
 			return EXIT_FAILURE;
 		}
+
+#ifndef _UNICODE
+		RtlFreeAnsiString(&as);
+#endif
 
 		TCHAR szProcessPath[MAX_PATH] {};
 		if (_stprintf_s(szProcessPath, _countof(szProcessPath), _T("%s%s%s32%s"), szDrive, szDirectory, szName, szExt) < 0) {
@@ -2952,10 +3026,17 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 		errno_t err = _tsplitpath_s(as.Buffer, szDrive, _countof(szDrive), szDirectory, _countof(szDirectory), szName, _countof(szName), szExt, _countof(szExt));
 #endif
 		if (err != 0) {
+#ifndef _UNICODE
+			RtlFreeAnsiString(&as);
+#endif
 			_tprintf_s(_T("ERROR: _tsplitpath_s (Error = %i)\n"), err);
 			CloseHandle(hJob);
 			return EXIT_FAILURE;
 		}
+
+#ifndef _UNICODE
+		RtlFreeAnsiString(&as);
+#endif
 
 		PTCHAR szSubString = _tcsstr(szName, _T("32"));
 		if (szSubString) {
@@ -3071,6 +3152,7 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 	pCommandLine[CommandLine.size()] = _T('\0');
 
 	if (!EnableDebugPrivilege(GetCurrentProcess(), true)) {
+		CloseHandle(hJob);
 		return EXIT_FAILURE;
 	}
 
