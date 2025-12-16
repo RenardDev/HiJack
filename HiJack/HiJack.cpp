@@ -164,7 +164,7 @@ struct IFT_VIEW {
 
 // General definitions
 
-#define HIJACK_VERSION "4.1.0"
+#define HIJACK_VERSION "4.1.1"
 
 #define ProcessDebugObjectHandle static_cast<PROCESSINFOCLASS>(0x1E)
 #define ProcessDebugFlags static_cast<PROCESSINFOCLASS>(0x1F)
@@ -2387,8 +2387,9 @@ DEFINE_CODE_IN_SECTION(".load") bool UnlinkBaseAddressIndex(PLOADER_DATA pLD, De
 	}
 
 	auto pTree = GetLdrpModuleIndexBase();
-	if (!pTree)
+	if (!pTree) {
 		return true;
+	}
 
 	auto pNode = reinterpret_cast<Detours::PRTL_BALANCED_NODE>(&pDTE->BaseAddressIndexNode);
 
@@ -3031,10 +3032,11 @@ DEFINE_CODE_IN_SECTION(".load") DWORD WINAPI Loader(LPVOID lpParameter) {
 				return EXIT_FAILURE;
 			}
 		}
+
+		SIZE_T unSize = 0;
+		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
 	}
 
-	SIZE_T unSize = 0;
-	pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
 	return EXIT_SUCCESS;
 }
 
@@ -3190,7 +3192,90 @@ void OnRIPEvent(DWORD unProcessID, DWORD unThreadID, DWORD unError, DWORD unType
 #endif // !_DEBUG
 }
 
+void WriteMiniDump(DWORD unProcessID, DWORD unThreadID, HANDLE hProcess, HANDLE hThread, const EXCEPTION_DEBUG_INFO& info, LPCTSTR szTag, MINIDUMP_TYPE nDumpType) {
+	auto ProcessDirectory = GetProcessDirectory(hProcess);
+	if (!ProcessDirectory.first) {
+		return;
+	}
+
+	SYSTEMTIME st {};
+	GetLocalTime(&st);
+
+	TCHAR szDumpPath[MAX_PATH] {};
+	StringCchPrintf(szDumpPath, _countof(szDumpPath), _T("%s\\%s_%lu_%lu_0x%08X_%04u%02u%02u_%02u%02u%02u.dmp"), ProcessDirectory.second.c_str(), (szTag ? szTag : _T("DUMP")), unProcessID, unThreadID, info.ExceptionRecord.ExceptionCode, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+
+	HANDLE hFile = CreateFile(szDumpPath, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+	if (!hFile || (hFile == INVALID_HANDLE_VALUE)) {
+		_tprintf_s(_T("ERROR: CreateFile (Error = 0x%08X)\n"), GetLastError());
+		return;
+	}
+
+	EXCEPTION_POINTERS ep {};
+	MINIDUMP_EXCEPTION_INFORMATION mei {};
+	EXCEPTION_RECORD exr = info.ExceptionRecord;
+	CONTEXT ctx {};
+
+	bool bHaveExceptionInfo = false;
+
+	if (hThread) {
+		ctx.ContextFlags = CONTEXT_ALL;
+
+		if (GetThreadContext(hThread, &ctx)) {
+			ep.ExceptionRecord = &exr;
+			ep.ContextRecord = &ctx;
+
+			mei.ThreadId = unThreadID;
+			mei.ExceptionPointers = &ep;
+			mei.ClientPointers = FALSE;
+
+			bHaveExceptionInfo = true;
+		} else {
+			_tprintf_s(_T("ERROR: GetThreadContext (Error = 0x%08X)\n"), GetLastError());
+		}
+	}
+
+	if (!MiniDumpWriteDump(hProcess, unProcessID, hFile, nDumpType, bHaveExceptionInfo ? &mei : nullptr, nullptr, nullptr)) {
+		_tprintf_s(_T("ERROR: MiniDumpWriteDump (Error = 0x%08X)\n"), GetLastError());
+	} else {
+		_tprintf_s(_T("INFO: Dump: %s\n"), szDumpPath);
+	}
+
+	CloseHandle(hFile);
+}
+
 void OnExceptionEvent(DWORD unProcessID, DWORD unThreadID, const EXCEPTION_DEBUG_INFO& Info, bool bInitialBreakPoint, bool* pHandledException) {
+	auto Process = GetDebugProcess(unProcessID);
+	if (!Process) {
+		return;
+	}
+
+	auto Thread = GetDebugThread(unProcessID, unThreadID);
+	if (!Thread) {
+		return;
+	}
+
+	const DWORD unCode = Info.ExceptionRecord.ExceptionCode;
+
+	bool bInternalException = false;
+
+	if ((unCode == EXCEPTION_BREAKPOINT) || (unCode == EXCEPTION_SINGLE_STEP)) {
+		if (pHandledException && *pHandledException) {
+			bInternalException = true;
+		} else if (unCode == EXCEPTION_BREAKPOINT) {
+			auto itProc = g_Processes.find(unProcessID);
+			auto itEntry = g_ProcessesOriginalEntryPointByte.find(unProcessID);
+			if ((itProc != g_Processes.end()) && (itEntry != g_ProcessesOriginalEntryPointByte.end())) {
+				if (Info.ExceptionRecord.ExceptionAddress == itProc->second.second) {
+					bInternalException = true;
+				}
+			}
+		}
+	}
+
+	if (bInternalException) {
+		return;
+	}
+
 	auto it = g_RemoteLoaderSection.find(unProcessID);
 	if (it != g_RemoteLoaderSection.end()) {
 		size_t unBase = reinterpret_cast<size_t>(it->second.first);
@@ -3199,6 +3284,12 @@ void OnExceptionEvent(DWORD unProcessID, DWORD unThreadID, const EXCEPTION_DEBUG
 
 		if ((unAddress >= unBase) && (unAddress < (unBase + unSize))) {
 			size_t unRVA = unAddress - unBase;
+
+			if (!bInitialBreakPoint) {
+				const MINIDUMP_TYPE nDumpType = static_cast<MINIDUMP_TYPE>(MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules | MiniDumpWithHandleData | MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithDataSegs | MiniDumpWithProcessThreadData | MiniDumpWithFullMemoryInfo);
+				WriteMiniDump(unProcessID, unThreadID, Process, Thread, Info, _T("LOADER"), nDumpType);
+			}
+
 			_tprintf_s(_T("LOADER EXCEPTION (%s)\n"), Info.dwFirstChance ? _T("First-Chance") : _T("Second-Chance"));
 			_tprintf_s(_T("  CODE:       0x%08X\n"), Info.ExceptionRecord.ExceptionCode);
 #ifdef _WIN64
@@ -3225,6 +3316,11 @@ void OnExceptionEvent(DWORD unProcessID, DWORD unThreadID, const EXCEPTION_DEBUG
 
 			return;
 		}
+	}
+
+	if (!bInitialBreakPoint && !Info.dwFirstChance) {
+		const MINIDUMP_TYPE nDumpType = static_cast<MINIDUMP_TYPE>(MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules | MiniDumpWithHandleData | MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithDataSegs | MiniDumpWithProcessThreadData | MiniDumpWithFullMemoryInfo);
+		WriteMiniDump(unProcessID, unThreadID, Process, Thread, Info, _T("EXCEPTION"), nDumpType);
 	}
 
 #ifdef _DEBUG
@@ -3575,7 +3671,6 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 
 			switch (DebugEvent.dwDebugEventCode) {
 				case CREATE_PROCESS_DEBUG_EVENT:
-
 					if (!EnsureStub(DebugEvent.dwProcessId, DebugEvent.u.CreateProcessInfo.hProcess)) {
 						*pbContinue = false;
 						break;
@@ -4020,6 +4115,7 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 			if (!ContinueDebugEvent(DebugEvent.dwProcessId, DebugEvent.dwThreadId, ContinueStatus)) {
 				return false;
 			}
+
 		} else {
 			if (GetLastError() == ERROR_SEM_TIMEOUT) {
 				OnTimeout();
