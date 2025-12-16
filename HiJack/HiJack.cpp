@@ -17,6 +17,7 @@
 #include <clocale>
 
 // STL
+#include <type_traits>
 #include <array>
 #include <string>
 #include <unordered_map>
@@ -27,6 +28,9 @@
 
 // Detours
 #include "Detours.h"
+
+// CompileStackString
+#include "CompileStackString.h"
 
 // Types
 using tstring = std::basic_string<TCHAR, std::char_traits<TCHAR>, std::allocator<TCHAR>>;
@@ -160,7 +164,7 @@ struct IFT_VIEW {
 
 // General definitions
 
-#define HIJACK_VERSION "4.0.0"
+#define HIJACK_VERSION "4.1.0"
 
 #define ProcessDebugObjectHandle static_cast<PROCESSINFOCLASS>(0x1E)
 #define ProcessDebugFlags static_cast<PROCESSINFOCLASS>(0x1F)
@@ -1072,7 +1076,7 @@ bool SetDLLEntryBreakPointForModule(DWORD unProcessID, HANDLE hProcess, LPVOID p
 	return true;
 }
 
-static void RestoreAllProcessBreakPoints(DWORD unProcessID) {
+void RestoreAllProcessBreakPoints(DWORD unProcessID) {
 	LPVOID pStartAddress = nullptr;
 	auto Process = GetDebugProcess(unProcessID, &pStartAddress);
 	if (!Process) {
@@ -1345,162 +1349,194 @@ bool FillLoaderData(HANDLE hProcess, PLOADER_DATA pLoaderData) {
 	return true;
 }
 
-DEFINE_CODE_IN_SECTION(".load") __forceinline static SIZE_T __align_up(SIZE_T v, SIZE_T a) {
+DEFINE_DATA_IN_SECTION(".load") LOADER_DATA LoaderData;
+
+DEFINE_CODE_IN_SECTION(".load") SIZE_T __align_up(SIZE_T v, SIZE_T a) {
 	return (v + a - 1) & ~(a - 1);
 }
 
-
 DEFINE_CODE_IN_SECTION(".load") bool MapImage(PLOADER_DATA pLD) {
+	if (!pLD || !pLD->m_pImageAddress) {
+		return false;
+	}
+
 	auto pDH = reinterpret_cast<PIMAGE_DOS_HEADER>(pLD->m_pImageAddress);
 	auto pNTHs = reinterpret_cast<PIMAGE_NT_HEADERS>((reinterpret_cast<char*>(pDH) + pDH->e_lfanew));
 
 	PVOID pDesiredBase = reinterpret_cast<PVOID>(pNTHs->OptionalHeader.ImageBase);
-	SIZE_T cbImage = pNTHs->OptionalHeader.SizeOfImage;
+	SIZE_T unSizeOfImage = pNTHs->OptionalHeader.SizeOfImage;
 
-	if (!NT_SUCCESS(pLD->m_pNtAllocateVirtualMemory((HANDLE)-1, &pDesiredBase, 0, &cbImage, MEM_RESERVE, PAGE_READWRITE))) {
+	if (!NT_SUCCESS(pLD->m_pNtAllocateVirtualMemory(reinterpret_cast<HANDLE>(-1), &pDesiredBase, 0, &unSizeOfImage, MEM_RESERVE, PAGE_READWRITE))) {
 		pDesiredBase = nullptr;
-		if (!NT_SUCCESS(pLD->m_pNtAllocateVirtualMemory((HANDLE)-1, &pDesiredBase, 0, &cbImage, MEM_RESERVE, PAGE_READWRITE)))
+
+		if (!NT_SUCCESS(pLD->m_pNtAllocateVirtualMemory(reinterpret_cast<HANDLE>(-1), &pDesiredBase, 0, &unSizeOfImage, MEM_RESERVE, PAGE_READWRITE))) {
 			return false;
+		}
 	}
 
 	PVOID pHeaders = pDesiredBase;
-	SIZE_T cbHeaders = __align_up(pNTHs->OptionalHeader.SizeOfHeaders, 0x1000);
-	if (!NT_SUCCESS(pLD->m_pNtAllocateVirtualMemory((HANDLE)-1, &pHeaders, 0, &cbHeaders, MEM_COMMIT, PAGE_READWRITE))) {
-		pLD->m_pNtFreeVirtualMemory((HANDLE)-1, &pDesiredBase, &cbImage, MEM_RELEASE);
+	SIZE_T unSizeOfHeaders = __align_up(pNTHs->OptionalHeader.SizeOfHeaders, 0x1000);
+	if (!NT_SUCCESS(pLD->m_pNtAllocateVirtualMemory(reinterpret_cast<HANDLE>(-1), &pHeaders, 0, &unSizeOfHeaders, MEM_COMMIT, PAGE_READWRITE))) {
+		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pDesiredBase, &unSizeOfImage, MEM_RELEASE);
 		return false;
 	}
 
-	if (!NT_SUCCESS(pLD->m_pNtWriteVirtualMemory((HANDLE)-1, pDesiredBase, pDH, pNTHs->OptionalHeader.SizeOfHeaders, nullptr))) {
-		pLD->m_pNtFreeVirtualMemory((HANDLE)-1, &pDesiredBase, &cbImage, MEM_RELEASE);
+	if (!NT_SUCCESS(pLD->m_pNtWriteVirtualMemory(reinterpret_cast<HANDLE>(-1), pDesiredBase, pDH, pNTHs->OptionalHeader.SizeOfHeaders, nullptr))) {
+		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pDesiredBase, &unSizeOfImage, MEM_RELEASE);
 		return false;
 	}
 
-	auto sec = IMAGE_FIRST_SECTION(pNTHs);
+	auto pFirstSection = IMAGE_FIRST_SECTION(pNTHs);
 	for (WORD i = 0; i < pNTHs->FileHeader.NumberOfSections; ++i) {
-		SIZE_T commitSize = sec[i].Misc.VirtualSize ? sec[i].Misc.VirtualSize : sec[i].SizeOfRawData;
-		if (!commitSize)
+		SIZE_T unCommitSize = pFirstSection[i].Misc.VirtualSize ? pFirstSection[i].Misc.VirtualSize : pFirstSection[i].SizeOfRawData;
+		if (!unCommitSize) {
 			continue;
-		commitSize = __align_up(commitSize, 0x1000);
+		}
 
-		PVOID pSectionAddress = reinterpret_cast<PVOID>((ULONG_PTR)pDesiredBase + sec[i].VirtualAddress);
-		if (!NT_SUCCESS(pLD->m_pNtAllocateVirtualMemory((HANDLE)-1, &pSectionAddress, 0, &commitSize, MEM_COMMIT, PAGE_READWRITE))) {
-			pLD->m_pNtFreeVirtualMemory((HANDLE)-1, &pDesiredBase, &cbImage, MEM_RELEASE);
+		unCommitSize = __align_up(unCommitSize, 0x1000);
+
+		PVOID pSectionAddress = reinterpret_cast<PVOID>(reinterpret_cast<ULONG_PTR>(pDesiredBase) + pFirstSection[i].VirtualAddress);
+		if (!NT_SUCCESS(pLD->m_pNtAllocateVirtualMemory(reinterpret_cast<HANDLE>(-1), &pSectionAddress, 0, &unCommitSize, MEM_COMMIT, PAGE_READWRITE))) {
+			pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pDesiredBase, &unSizeOfImage, MEM_RELEASE);
 			return false;
 		}
 
-		ULONG toCopy = sec[i].SizeOfRawData;
-		if (toCopy) {
-			PVOID pSectionData = reinterpret_cast<PVOID>((ULONG_PTR)pDH + sec[i].PointerToRawData);
-			if (!NT_SUCCESS(pLD->m_pNtWriteVirtualMemory((HANDLE)-1, pSectionAddress, pSectionData, toCopy, nullptr))) {
-				pLD->m_pNtFreeVirtualMemory((HANDLE)-1, &pDesiredBase, &cbImage, MEM_RELEASE);
+		ULONG unToCopy = pFirstSection[i].SizeOfRawData;
+		if (unToCopy) {
+			PVOID pSectionData = reinterpret_cast<PVOID>(reinterpret_cast<ULONG_PTR>(pDH) + pFirstSection[i].PointerToRawData);
+			if (!NT_SUCCESS(pLD->m_pNtWriteVirtualMemory(reinterpret_cast<HANDLE>(-1), pSectionAddress, pSectionData, unToCopy, nullptr))) {
+				pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pDesiredBase, &unSizeOfImage, MEM_RELEASE);
 				return false;
 			}
 		}
 	}
 
-	SIZE_T zero = 0;
-	pLD->m_pNtFreeVirtualMemory((HANDLE)-1, &pLD->m_pImageAddress, &zero, MEM_RELEASE);
+	SIZE_T unZero = 0;
+	pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unZero, MEM_RELEASE);
 	pLD->m_pImageAddress = pDesiredBase;
+
 	return true;
 }
 
 DEFINE_CODE_IN_SECTION(".load") bool FixRelocations(PLOADER_DATA pLD) {
+	if (!pLD || !pLD->m_pImageAddress) {
+		return false;
+	}
+
 	auto pDH = reinterpret_cast<PIMAGE_DOS_HEADER>(pLD->m_pImageAddress);
 	auto pNTHs = reinterpret_cast<PIMAGE_NT_HEADERS>((reinterpret_cast<char*>(pDH) + pDH->e_lfanew));
 
-	const DWORD_PTR delta = reinterpret_cast<DWORD_PTR>(pDH) - pNTHs->OptionalHeader.ImageBase;
-	if (!delta)
+	const DWORD_PTR unDelta = reinterpret_cast<DWORD_PTR>(pDH) - pNTHs->OptionalHeader.ImageBase;
+	if (!unDelta) {
 		return true;
-
-	if (pNTHs->FileHeader.Characteristics & IMAGE_FILE_RELOCS_STRIPPED) {
-		return false; // база смещена, а релокаций нет — ошибка
 	}
 
-	auto dir = &pNTHs->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
-	if (!dir->VirtualAddress || !dir->Size)
+	if (pNTHs->FileHeader.Characteristics & IMAGE_FILE_RELOCS_STRIPPED) {
+		return false;
+	}
+
+	auto pDD = &pNTHs->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+	if (!pDD->VirtualAddress || !pDD->Size) {
 		return true;
+	}
 
-	const WORD machine = pNTHs->FileHeader.Machine;
+	const WORD unMachine = pNTHs->FileHeader.Machine;
 
-	auto rel = reinterpret_cast<PIMAGE_BASE_RELOCATION>((reinterpret_cast<char*>(pDH) + dir->VirtualAddress));
-	while (rel->VirtualAddress && rel->SizeOfBlock) {
-		DWORD_PTR base = reinterpret_cast<DWORD_PTR>(pDH) + rel->VirtualAddress;
-		DWORD count = (rel->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
-		PWORD entries = reinterpret_cast<PWORD>(rel + 1);
+	auto pRelocation = reinterpret_cast<PIMAGE_BASE_RELOCATION>((reinterpret_cast<char*>(pDH) + pDD->VirtualAddress));
+	while (pRelocation->VirtualAddress && pRelocation->SizeOfBlock) {
+		DWORD_PTR unBase = reinterpret_cast<DWORD_PTR>(pDH) + pRelocation->VirtualAddress;
+		DWORD unCount = (pRelocation->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
+		PWORD pEntries = reinterpret_cast<PWORD>(pRelocation + 1);
 
-		for (DWORD i = 0; i < count; ++i) {
-			WORD entry = entries[i];
-			BYTE type = entry >> 12;
-			WORD offset = entry & 0x0FFF;
-			DWORD_PTR patch = base + offset;
+		for (DWORD i = 0; i < unCount; ++i) {
+			WORD unEntry = pEntries[i];
+			BYTE unType = unEntry >> 12;
+			WORD unOffset = unEntry & 0x0FFF;
+			DWORD_PTR unPatch = unBase + unOffset;
 
-			switch (type) {
+			switch (unType) {
 				case IMAGE_REL_BASED_ABSOLUTE:
 					break;
+
 				case IMAGE_REL_BASED_HIGH:
-					*reinterpret_cast<WORD*>(patch) += HIWORD(static_cast<DWORD>(delta));
+					*reinterpret_cast<WORD*>(unPatch) += HIWORD(static_cast<DWORD>(unDelta));
 					break;
+
 				case IMAGE_REL_BASED_LOW:
-					*reinterpret_cast<WORD*>(patch) += LOWORD(static_cast<DWORD>(delta));
+					*reinterpret_cast<WORD*>(unPatch) += LOWORD(static_cast<DWORD>(unDelta));
 					break;
+
 				case IMAGE_REL_BASED_HIGHLOW:
-					*reinterpret_cast<DWORD*>(patch) += static_cast<DWORD>(delta);
+					*reinterpret_cast<DWORD*>(unPatch) += static_cast<DWORD>(unDelta);
 					break;
+
 				case IMAGE_REL_BASED_HIGHADJ: {
-					if (i + 1 >= count)
+					if (i + 1 >= unCount) {
 						return false;
-					SHORT addend = static_cast<SHORT>(entries[++i]);
-					LONG high = *reinterpret_cast<SHORT*>(patch);
-					LONG tmp = (high << 16) + addend + static_cast<LONG>(delta);
-					*reinterpret_cast<WORD*>(patch) = HIWORD(tmp);
+					}
+
+					SHORT unAddend = static_cast<SHORT>(pEntries[++i]);
+					LONG unHigh = *reinterpret_cast<SHORT*>(unPatch);
+					LONG unTemp = (unHigh << 16) + unAddend + static_cast<LONG>(unDelta);
+					*reinterpret_cast<WORD*>(unPatch) = HIWORD(unTemp);
+
 					break;
 				}
+
 				case IMAGE_REL_BASED_DIR64:
-					*reinterpret_cast<ULONGLONG*>(patch) += static_cast<ULONGLONG>(delta);
+					*reinterpret_cast<ULONGLONG*>(unPatch) += static_cast<ULONGLONG>(unDelta);
 					break;
 
 				case IMAGE_REL_BASED_MACHINE_SPECIFIC_5:
-					switch (machine) {
+					switch (unMachine) {
 						case IMAGE_FILE_MACHINE_ARMNT:
 						case IMAGE_FILE_MACHINE_THUMB:
-							*reinterpret_cast<DWORD*>(patch) += static_cast<DWORD>(delta);
+							*reinterpret_cast<DWORD*>(unPatch) += static_cast<DWORD>(unDelta);
 							break;
+
 						case IMAGE_FILE_MACHINE_MIPS16:
 						case IMAGE_FILE_MACHINE_MIPSFPU:
 						case IMAGE_FILE_MACHINE_MIPSFPU16: {
-							DWORD ins = *reinterpret_cast<DWORD*>(patch);
-							ins = (ins & ~0x03FFFFFF) | ((((ins & 0x03FFFFFF) << 2) + static_cast<DWORD>(delta)) >> 2);
-							*reinterpret_cast<DWORD*>(patch) = ins;
+							DWORD ins = *reinterpret_cast<DWORD*>(unPatch);
+							ins = (ins & ~0x03FFFFFF) | ((((ins & 0x03FFFFFF) << 2) + static_cast<DWORD>(unDelta)) >> 2);
+							*reinterpret_cast<DWORD*>(unPatch) = ins;
 							break;
 						}
+
 						default:
 							return false;
 					}
+
 					break;
 
 				case IMAGE_REL_BASED_THUMB_MOV32:
-					if (machine == IMAGE_FILE_MACHINE_ARMNT) {
-						*reinterpret_cast<DWORD*>(patch) += static_cast<DWORD>(delta);
-					} else
+					if (unMachine == IMAGE_FILE_MACHINE_ARMNT) {
+						*reinterpret_cast<DWORD*>(unPatch) += static_cast<DWORD>(unDelta);
+					} else {
 						return false;
+					}
+
 					break;
 
 				case IMAGE_REL_BASED_MACHINE_SPECIFIC_9:
-					switch (machine) {
+					switch (unMachine) {
 						case IMAGE_FILE_MACHINE_IA64:
-							*reinterpret_cast<ULONGLONG*>(patch) += static_cast<ULONGLONG>(delta);
+							*reinterpret_cast<ULONGLONG*>(unPatch) += static_cast<ULONGLONG>(unDelta);
 							break;
+
 						case IMAGE_FILE_MACHINE_MIPS16:
 						case IMAGE_FILE_MACHINE_MIPSFPU:
 						case IMAGE_FILE_MACHINE_MIPSFPU16: {
-							WORD ins = *reinterpret_cast<WORD*>(patch);
-							ins = (ins & ~0xFFFF) | ((((ins & 0xFFFF) << 2) + static_cast<WORD>(delta)) >> 2);
-							*reinterpret_cast<WORD*>(patch) = ins;
+							WORD ins = *reinterpret_cast<WORD*>(unPatch);
+							ins = (ins & ~0xFFFF) | ((((ins & 0xFFFF) << 2) + static_cast<WORD>(unDelta)) >> 2);
+							*reinterpret_cast<WORD*>(unPatch) = ins;
 							break;
 						}
+
 						default:
 							return false;
 					}
+
 					break;
 
 				default:
@@ -1508,142 +1544,184 @@ DEFINE_CODE_IN_SECTION(".load") bool FixRelocations(PLOADER_DATA pLD) {
 			}
 		}
 
-		rel = reinterpret_cast<PIMAGE_BASE_RELOCATION>((reinterpret_cast<char*>(rel) + rel->SizeOfBlock));
+		pRelocation = reinterpret_cast<PIMAGE_BASE_RELOCATION>((reinterpret_cast<char*>(pRelocation) + pRelocation->SizeOfBlock));
 	}
+
 	return true;
 }
 
 DEFINE_CODE_IN_SECTION(".load") bool ResolveImports(PLOADER_DATA pLD) {
+	if (!pLD || !pLD->m_pImageAddress) {
+		return false;
+	}
+
 	auto pDH = reinterpret_cast<PIMAGE_DOS_HEADER>(pLD->m_pImageAddress);
 	auto pNTHs = reinterpret_cast<PIMAGE_NT_HEADERS>((reinterpret_cast<char*>(pDH) + pDH->e_lfanew));
 
-	auto dir = &pNTHs->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
-	if (!dir->VirtualAddress)
+	auto pDD = &pNTHs->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+	if (!pDD->VirtualAddress) {
 		return true;
+	}
 
-	auto desc = reinterpret_cast<PIMAGE_IMPORT_DESCRIPTOR>((reinterpret_cast<char*>(pDH) + dir->VirtualAddress));
-	while (desc->Name) {
-		const char* mod = reinterpret_cast<const char*>((reinterpret_cast<char*>(pDH) + desc->Name));
+	auto pIID = reinterpret_cast<PIMAGE_IMPORT_DESCRIPTOR>((reinterpret_cast<char*>(pDH) + pDD->VirtualAddress));
+	while (pIID->Name) {
+		const char* szModuleName = reinterpret_cast<const char*>((reinterpret_cast<char*>(pDH) + pIID->Name));
 
 		ANSI_STRING as {};
 		UNICODE_STRING us {};
-		pLD->m_pRtlInitAnsiString(&as, mod);
-		if (!NT_SUCCESS(pLD->m_pRtlAnsiStringToUnicodeString(&us, &as, TRUE)))
+		pLD->m_pRtlInitAnsiString(&as, szModuleName);
+		if (!NT_SUCCESS(pLD->m_pRtlAnsiStringToUnicodeString(&us, &as, TRUE))) {
 			return false;
+		}
 
 		HMODULE hModule = nullptr;
 		if (!NT_SUCCESS(pLD->m_pLdrLoadDll(NULL, 0, &us, reinterpret_cast<PHANDLE>(&hModule)))) {
 			pLD->m_pRtlFreeUnicodeString(&us);
 			return false;
 		}
+
 		pLD->m_pRtlFreeUnicodeString(&us);
 
-		PIMAGE_THUNK_DATA pThunk = (desc->OriginalFirstThunk != 0)
-		                               ? reinterpret_cast<PIMAGE_THUNK_DATA>((reinterpret_cast<char*>(pDH) + desc->OriginalFirstThunk))
-		                               : reinterpret_cast<PIMAGE_THUNK_DATA>((reinterpret_cast<char*>(pDH) + desc->FirstThunk));
-		PIMAGE_THUNK_DATA pIAT = reinterpret_cast<PIMAGE_THUNK_DATA>((reinterpret_cast<char*>(pDH) + desc->FirstThunk));
+		PIMAGE_THUNK_DATA pThunk = (pIID->OriginalFirstThunk != 0)
+		                               ? reinterpret_cast<PIMAGE_THUNK_DATA>((reinterpret_cast<char*>(pDH) + pIID->OriginalFirstThunk))
+		                               : reinterpret_cast<PIMAGE_THUNK_DATA>((reinterpret_cast<char*>(pDH) + pIID->FirstThunk));
+		PIMAGE_THUNK_DATA pIAT = reinterpret_cast<PIMAGE_THUNK_DATA>((reinterpret_cast<char*>(pDH) + pIID->FirstThunk));
 
 		while (pThunk->u1.AddressOfData) {
 			if (pThunk->u1.Ordinal & IMAGE_ORDINAL_FLAG) {
-				ULONG ord = IMAGE_ORDINAL(pThunk->u1.Ordinal);
-				PVOID proc = nullptr;
-				if (!NT_SUCCESS(pLD->m_pLdrGetProcedureAddress(hModule, NULL, ord, &proc)))
+				ULONG unOrdinal = IMAGE_ORDINAL(pThunk->u1.Ordinal);
+
+				PVOID pProcedure = nullptr;
+				if (!NT_SUCCESS(pLD->m_pLdrGetProcedureAddress(hModule, NULL, unOrdinal, &pProcedure))) {
 					return false;
-				pIAT->u1.Function = reinterpret_cast<ULONG_PTR>(proc);
+				}
+
+				pIAT->u1.Function = reinterpret_cast<ULONG_PTR>(pProcedure);
+
 			} else {
-				auto byName = reinterpret_cast<PIMAGE_IMPORT_BY_NAME>((reinterpret_cast<char*>(pDH) + pThunk->u1.AddressOfData));
+				auto pIBN = reinterpret_cast<PIMAGE_IMPORT_BY_NAME>((reinterpret_cast<char*>(pDH) + pThunk->u1.AddressOfData));
+
 				ANSI_STRING asn {};
-				pLD->m_pRtlInitAnsiString(&asn, byName->Name);
-				PVOID proc = nullptr;
-				if (!NT_SUCCESS(pLD->m_pLdrGetProcedureAddress(hModule, &asn, 0, &proc)))
+				pLD->m_pRtlInitAnsiString(&asn, pIBN->Name);
+
+				PVOID pProcedure = nullptr;
+				if (!NT_SUCCESS(pLD->m_pLdrGetProcedureAddress(hModule, &asn, 0, &pProcedure))) {
 					return false;
-				pIAT->u1.Function = reinterpret_cast<ULONG_PTR>(proc);
+				}
+
+				pIAT->u1.Function = reinterpret_cast<ULONG_PTR>(pProcedure);
 			}
+
 			++pThunk;
 			++pIAT;
 		}
-		++desc;
+
+		++pIID;
 	}
+
 	return true;
 }
 
 DEFINE_CODE_IN_SECTION(".load") bool ResolveDelayedImports(PLOADER_DATA pLD) {
+	if (!pLD || !pLD->m_pImageAddress) {
+		return false;
+	}
+
 	auto pDH = reinterpret_cast<PIMAGE_DOS_HEADER>(pLD->m_pImageAddress);
 	auto pNTHs = reinterpret_cast<PIMAGE_NT_HEADERS>((reinterpret_cast<char*>(pDH) + pDH->e_lfanew));
 
-	auto dir = &pNTHs->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT];
-	if (!dir->VirtualAddress)
+	auto pDD = &pNTHs->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT];
+	if (!pDD->VirtualAddress) {
 		return true;
+	}
 
-	auto d = reinterpret_cast<PIMAGE_DELAYLOAD_DESCRIPTOR>((reinterpret_cast<char*>(pDH) + dir->VirtualAddress));
-	while (d->DllNameRVA) {
-		const char* mod = reinterpret_cast<const char*>((reinterpret_cast<char*>(pDH) + d->DllNameRVA));
+	auto pDLD = reinterpret_cast<PIMAGE_DELAYLOAD_DESCRIPTOR>((reinterpret_cast<char*>(pDH) + pDD->VirtualAddress));
+	while (pDLD->DllNameRVA) {
+		const char* szModule = reinterpret_cast<const char*>((reinterpret_cast<char*>(pDH) + pDLD->DllNameRVA));
 
 		ANSI_STRING as {};
 		UNICODE_STRING us {};
-		pLD->m_pRtlInitAnsiString(&as, mod);
-		if (!NT_SUCCESS(pLD->m_pRtlAnsiStringToUnicodeString(&us, &as, TRUE)))
+		pLD->m_pRtlInitAnsiString(&as, szModule);
+		if (!NT_SUCCESS(pLD->m_pRtlAnsiStringToUnicodeString(&us, &as, TRUE))) {
 			return false;
+		}
 
 		HMODULE hModule = nullptr;
 		if (!NT_SUCCESS(pLD->m_pLdrLoadDll(NULL, 0, &us, reinterpret_cast<PHANDLE>(&hModule)))) {
 			pLD->m_pRtlFreeUnicodeString(&us);
 			return false;
 		}
+
 		pLD->m_pRtlFreeUnicodeString(&us);
 
-		auto pIAT = reinterpret_cast<PIMAGE_THUNK_DATA>((reinterpret_cast<char*>(pDH) + d->ImportAddressTableRVA));
-		auto pINT = reinterpret_cast<PIMAGE_THUNK_DATA>((reinterpret_cast<char*>(pDH) + d->ImportNameTableRVA));
+		auto pIAT = reinterpret_cast<PIMAGE_THUNK_DATA>((reinterpret_cast<char*>(pDH) + pDLD->ImportAddressTableRVA));
+		auto pINT = reinterpret_cast<PIMAGE_THUNK_DATA>((reinterpret_cast<char*>(pDH) + pDLD->ImportNameTableRVA));
 
 		while (pINT->u1.Ordinal) {
 			if (pINT->u1.Ordinal & IMAGE_ORDINAL_FLAG) {
-				ULONG ord = IMAGE_ORDINAL(pINT->u1.Ordinal);
-				PVOID proc = nullptr;
-				if (!NT_SUCCESS(pLD->m_pLdrGetProcedureAddress(hModule, NULL, ord, &proc)))
+				ULONG unOrdinal = IMAGE_ORDINAL(pINT->u1.Ordinal);
+
+				PVOID pProcedure = nullptr;
+				if (!NT_SUCCESS(pLD->m_pLdrGetProcedureAddress(hModule, NULL, unOrdinal, &pProcedure))) {
 					return false;
-				pIAT->u1.Function = reinterpret_cast<ULONG_PTR>(proc);
+				}
+
+				pIAT->u1.Function = reinterpret_cast<ULONG_PTR>(pProcedure);
 			} else {
-				auto byName = reinterpret_cast<PIMAGE_IMPORT_BY_NAME>((reinterpret_cast<char*>(pDH) + pINT->u1.AddressOfData));
+				auto pIBN = reinterpret_cast<PIMAGE_IMPORT_BY_NAME>((reinterpret_cast<char*>(pDH) + pINT->u1.AddressOfData));
+
 				ANSI_STRING asn {};
-				pLD->m_pRtlInitAnsiString(&asn, byName->Name);
-				PVOID proc = nullptr;
-				if (!NT_SUCCESS(pLD->m_pLdrGetProcedureAddress(hModule, &asn, 0, &proc)))
+				pLD->m_pRtlInitAnsiString(&asn, pIBN->Name);
+
+				PVOID pProcedure = nullptr;
+				if (!NT_SUCCESS(pLD->m_pLdrGetProcedureAddress(hModule, &asn, 0, &pProcedure))) {
 					return false;
-				pIAT->u1.Function = reinterpret_cast<ULONG_PTR>(proc);
+				}
+
+				pIAT->u1.Function = reinterpret_cast<ULONG_PTR>(pProcedure);
 			}
+
 			++pIAT;
 			++pINT;
 		}
-		++d;
+
+		++pDLD;
 	}
+
 	return true;
 }
 
 DEFINE_CODE_IN_SECTION(".load") bool ProtectSections(PLOADER_DATA pLD) {
+	if (!pLD || !pLD->m_pImageAddress) {
+		return false;
+	}
+
 	auto pDH = reinterpret_cast<PIMAGE_DOS_HEADER>(pLD->m_pImageAddress);
 	auto pNTHs = reinterpret_cast<PIMAGE_NT_HEADERS>((reinterpret_cast<char*>(pDH) + pDH->e_lfanew));
 
-	auto sec = IMAGE_FIRST_SECTION(pNTHs);
+	auto pFirstSection = IMAGE_FIRST_SECTION(pNTHs);
 	for (WORD i = 0; i < pNTHs->FileHeader.NumberOfSections; ++i) {
-		DWORD ch = sec[i].Characteristics;
-		DWORD unProtection =
-		    (ch & IMAGE_SCN_MEM_EXECUTE) ? ((ch & IMAGE_SCN_MEM_WRITE) ? PAGE_EXECUTE_READWRITE : PAGE_EXECUTE_READ) : (ch & IMAGE_SCN_MEM_WRITE) ? PAGE_READWRITE
-		                                                                                                             : (ch & IMAGE_SCN_MEM_READ   ? PAGE_READONLY
-		                                                                                                                                          : PAGE_NOACCESS);
-
-		PVOID addr = reinterpret_cast<PVOID>((reinterpret_cast<char*>(pDH) + sec[i].VirtualAddress));
-		SIZE_T size = sec[i].Misc.VirtualSize ? sec[i].Misc.VirtualSize : sec[i].SizeOfRawData;
-		if (!size)
+		DWORD unCharacteristics = pFirstSection[i].Characteristics;
+		DWORD unProtection = (unCharacteristics & IMAGE_SCN_MEM_EXECUTE) ? ((unCharacteristics & IMAGE_SCN_MEM_WRITE) ? PAGE_EXECUTE_READWRITE : PAGE_EXECUTE_READ) : (unCharacteristics & IMAGE_SCN_MEM_WRITE) ? PAGE_READWRITE
+		                                                                                                                                                                                       : (unCharacteristics & IMAGE_SCN_MEM_READ ? PAGE_READONLY : PAGE_NOACCESS);
+		PVOID unAddress = reinterpret_cast<PVOID>((reinterpret_cast<char*>(pDH) + pFirstSection[i].VirtualAddress));
+		SIZE_T unSize = pFirstSection[i].Misc.VirtualSize ? pFirstSection[i].Misc.VirtualSize : pFirstSection[i].SizeOfRawData;
+		if (!unSize) {
 			continue;
-		size = __align_up(size, 0x1000);
+		}
 
-		ULONG oldProt = 0;
-		if (!NT_SUCCESS(pLD->m_pNtProtectVirtualMemory((HANDLE)-1, &addr, &size, unProtection, &oldProt)))
+		unSize = __align_up(unSize, 0x1000);
+
+		ULONG unOldProtection = 0;
+		if (!NT_SUCCESS(pLD->m_pNtProtectVirtualMemory(reinterpret_cast<HANDLE>(-1), &unAddress, &unSize, unProtection, &unOldProtection))) {
 			return false;
+		}
 
-		if (ch & IMAGE_SCN_MEM_EXECUTE)
-			pLD->m_pNtFlushInstructionCache((HANDLE)-1, nullptr, 0);
+		if (unCharacteristics & IMAGE_SCN_MEM_EXECUTE) {
+			pLD->m_pNtFlushInstructionCache(reinterpret_cast<HANDLE>(-1), nullptr, 0);
+		}
 	}
+
 	return true;
 }
 
@@ -1665,11 +1743,11 @@ DEFINE_CODE_IN_SECTION(".load") PLIST_ENTRY FindModuleListEntry(void* pBaseAddre
 		return nullptr;
 	}
 
-	PLIST_ENTRY pHead = &pPEB->Ldr->InLoadOrderModuleList;
-	for (PLIST_ENTRY e = pHead->Flink; e != pHead; e = e->Flink) {
-		auto pDTE = CONTAINING_RECORD(e, Detours::LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+	auto pHead = &pPEB->Ldr->InLoadOrderModuleList;
+	for (auto pEntry = pHead->Flink; pEntry != pHead; pEntry = pEntry->Flink) {
+		auto pDTE = CONTAINING_RECORD(pEntry, Detours::LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
 		if (pDTE->DllBase == pBaseAddress) {
-			return e;
+			return pEntry;
 		}
 	}
 
@@ -1689,7 +1767,7 @@ DEFINE_CODE_IN_SECTION(".load") Detours::PLDR_DATA_TABLE_ENTRY FindModuleDataTab
 	return CONTAINING_RECORD(pEntry, Detours::LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
 }
 
-DEFINE_CODE_IN_SECTION(".load") static const wchar_t* __wbasename(const wchar_t* szFull) {
+DEFINE_CODE_IN_SECTION(".load") const wchar_t* __wbasename(const wchar_t* szFull) {
 	if (!szFull) {
 		return nullptr;
 	}
@@ -1705,7 +1783,7 @@ DEFINE_CODE_IN_SECTION(".load") static const wchar_t* __wbasename(const wchar_t*
 	return b;
 }
 
-DEFINE_CODE_IN_SECTION(".load") __forceinline static SIZE_T __wstrlen(const wchar_t* szString) {
+DEFINE_CODE_IN_SECTION(".load") SIZE_T __wstrlen(const wchar_t* szString) {
 	if (!szString) {
 		return 0;
 	}
@@ -1718,7 +1796,7 @@ DEFINE_CODE_IN_SECTION(".load") __forceinline static SIZE_T __wstrlen(const wcha
 	return static_cast<SIZE_T>(p - szString);
 }
 
-DEFINE_CODE_IN_SECTION(".load") static void __wcopy(wchar_t* szDestionation, const wchar_t* szSource, SIZE_T unSize) {
+DEFINE_CODE_IN_SECTION(".load") void __wcopy(wchar_t* szDestionation, const wchar_t* szSource, SIZE_T unSize) {
 	if (!szDestionation || !szSource || !unSize) {
 		return;
 	}
@@ -1732,7 +1810,7 @@ DEFINE_CODE_IN_SECTION(".load") static void __wcopy(wchar_t* szDestionation, con
 	}
 }
 
-DEFINE_CODE_IN_SECTION(".load") static bool __MakeHeapUnicodeString(PLOADER_DATA pLD, const wchar_t* szSource, UNICODE_STRING& usOut) {
+DEFINE_CODE_IN_SECTION(".load") bool __MakeHeapUnicodeString(PLOADER_DATA pLD, const wchar_t* szSource, UNICODE_STRING& usOut) {
 	usOut.Buffer = nullptr;
 	usOut.Length = usOut.MaximumLength = 0;
 
@@ -1763,7 +1841,7 @@ DEFINE_CODE_IN_SECTION(".load") static bool __MakeHeapUnicodeString(PLOADER_DATA
 	return true;
 }
 
-DEFINE_CODE_IN_SECTION(".load") static ULONG HashBaseDllName(PLOADER_DATA pLD, Detours::LDR_DATA_TABLE_ENTRY* pDTE) {
+DEFINE_CODE_IN_SECTION(".load") ULONG HashBaseDllName(PLOADER_DATA pLD, Detours::LDR_DATA_TABLE_ENTRY* pDTE) {
 	if (pDTE->BaseDllName.Buffer && pDTE->BaseDllName.Length) {
 		ULONG unHash = 0;
 		if (NT_SUCCESS(pLD->m_pRtlHashUnicodeString(reinterpret_cast<PUNICODE_STRING>(&pDTE->BaseDllName), TRUE, 0, &unHash))) {
@@ -1846,7 +1924,7 @@ DEFINE_CODE_IN_SECTION(".load") bool AttachDdagNode(PLOADER_DATA pLD, Detours::P
 	return true;
 }
 
-DEFINE_CODE_IN_SECTION(".load") inline void NormalizeAllLinks(Detours::PLDR_DATA_TABLE_ENTRY pDTE) {
+DEFINE_CODE_IN_SECTION(".load") void NormalizeAllLinks(Detours::PLDR_DATA_TABLE_ENTRY pDTE) {
 	InitializeListHead(&pDTE->InLoadOrderLinks);
 	InitializeListHead(&pDTE->InInitializationOrderLinks);
 	InitializeListHead(&pDTE->InMemoryOrderLinks);
@@ -1854,11 +1932,11 @@ DEFINE_CODE_IN_SECTION(".load") inline void NormalizeAllLinks(Detours::PLDR_DATA
 	InitializeListHead(&pDTE->NodeModuleLink);
 }
 
-DEFINE_CODE_IN_SECTION(".load") __forceinline static WCHAR __towupper(WCHAR c) {
+DEFINE_CODE_IN_SECTION(".load") WCHAR __towupper(WCHAR c) {
 	return ((c >= L'a') && (c <= L'z')) ? (c - (L'a' - L'A')) : c;
 }
 
-DEFINE_CODE_IN_SECTION(".load") static bool __us_equal_icase(const Detours::UNICODE_STRING& us, const wchar_t* lit) {
+DEFINE_CODE_IN_SECTION(".load") bool __us_equal_icase(const Detours::UNICODE_STRING& us, const wchar_t* lit) {
 	if (!us.Buffer || !lit) {
 		return false;
 	}
@@ -1877,7 +1955,7 @@ DEFINE_CODE_IN_SECTION(".load") static bool __us_equal_icase(const Detours::UNIC
 	return true;
 }
 
-DEFINE_CODE_IN_SECTION(".load") static Detours::PLDR_DATA_TABLE_ENTRY __FindDTEByBaseName(const wchar_t* baseName) {
+DEFINE_CODE_IN_SECTION(".load") Detours::PLDR_DATA_TABLE_ENTRY __FindDTEByBaseName(const wchar_t* baseName) {
 	auto pPEB = GetPEB();
 	if (!pPEB || !pPEB->Ldr) {
 		return nullptr;
@@ -1896,19 +1974,18 @@ DEFINE_CODE_IN_SECTION(".load") static Detours::PLDR_DATA_TABLE_ENTRY __FindDTEB
 	return nullptr;
 }
 
-
-DEFINE_CODE_IN_SECTION(".load") inline Detours::PLDR_DATA_TABLE_ENTRY GetNTDLLDTE() {
+DEFINE_CODE_IN_SECTION(".load") Detours::PLDR_DATA_TABLE_ENTRY GetNTDLLDTE() {
 	const wchar_t szNTDLL[] = { 110, 116, 100, 108, 108, 46, 100, 108, 108, 0 };
 	return __FindDTEByBaseName(szNTDLL);
 }
 
-DEFINE_CODE_IN_SECTION(".load") inline bool PointerInModule(const void* pPointer, const Detours::LDR_DATA_TABLE_ENTRY* pDTE) {
+DEFINE_CODE_IN_SECTION(".load") bool PointerInModule(const void* pPointer, const Detours::LDR_DATA_TABLE_ENTRY* pDTE) {
 	auto unPointer = reinterpret_cast<uintptr_t>(pPointer);
 	auto pBase = reinterpret_cast<uintptr_t>(pDTE->DllBase);
 	return (unPointer >= pBase) && (unPointer < (pBase + pDTE->SizeOfImage));
 }
 
-DEFINE_CODE_IN_SECTION(".load") static PLIST_ENTRY FindLdrpHashTableBaseEx(PLOADER_DATA pLD) {
+DEFINE_CODE_IN_SECTION(".load") PLIST_ENTRY FindLdrpHashTableBaseEx(PLOADER_DATA pLD) {
 	auto pDTE = GetNTDLLDTE();
 	if (!pDTE) {
 		return nullptr;
@@ -1926,7 +2003,7 @@ DEFINE_CODE_IN_SECTION(".load") static PLIST_ENTRY FindLdrpHashTableBaseEx(PLOAD
 	return nullptr;
 }
 
-DEFINE_CODE_IN_SECTION(".load") inline Detours::PRTL_BALANCED_NODE AscendToRoot(Detours::PRTL_BALANCED_NODE pNode) {
+DEFINE_CODE_IN_SECTION(".load") Detours::PRTL_BALANCED_NODE AscendToRoot(Detours::PRTL_BALANCED_NODE pNode) {
 	if (!pNode) {
 		return nullptr;
 	}
@@ -1947,7 +2024,7 @@ DEFINE_CODE_IN_SECTION(".load") inline Detours::PRTL_BALANCED_NODE AscendToRoot(
 	return pNode;
 }
 
-DEFINE_CODE_IN_SECTION(".load") static bool __secname_eq_nocase8(const BYTE szName[8], const char* szLit) {
+DEFINE_CODE_IN_SECTION(".load") bool __secname_eq_nocase8(const BYTE szName[8], const char* szLit) {
 	for (int i = 0; i < 8; ++i) {
 		char c = szLit[i];
 		char n = static_cast<char>(szName[i]);
@@ -1972,7 +2049,7 @@ DEFINE_CODE_IN_SECTION(".load") static bool __secname_eq_nocase8(const BYTE szNa
 	return szLit[8] == 0;
 }
 
-DEFINE_CODE_IN_SECTION(".load") inline bool FindSection(HMODULE hModule, const char* szName, BYTE*& pBase, SIZE_T& unSize) {
+DEFINE_CODE_IN_SECTION(".load") bool FindSection(HMODULE hModule, const char* szName, BYTE*& pBase, SIZE_T& unSize) {
 	pBase = nullptr;
 	unSize = 0;
 
@@ -1998,7 +2075,7 @@ DEFINE_CODE_IN_SECTION(".load") inline bool FindSection(HMODULE hModule, const c
 	return false;
 }
 
-DEFINE_CODE_IN_SECTION(".load") inline Detours::PRTL_RB_TREE LocateGlobalTreeByRoot(Detours::PRTL_BALANCED_NODE pRoot) {
+DEFINE_CODE_IN_SECTION(".load") Detours::PRTL_RB_TREE LocateGlobalTreeByRoot(Detours::PRTL_BALANCED_NODE pRoot) {
 	if (!pRoot) {
 		return nullptr;
 	}
@@ -2010,9 +2087,10 @@ DEFINE_CODE_IN_SECTION(".load") inline Detours::PRTL_RB_TREE LocateGlobalTreeByR
 
 	HMODULE hNTDLL = reinterpret_cast<HMODULE>(pDTE->DllBase);
 
-	const char pFirstSection[] = { 46, 109, 114, 100, 97, 116, 97, 0 };
-	const char pSecondSection[] = { 46, 100, 97, 116, 97, 0 };
-	const char* pSections[] = { pFirstSection, pSecondSection };
+	auto MRDATA = STACKSTRING(".mrdata");
+	auto DATA = STACKSTRING(".data");
+
+	const char* pSections[] = { MRDATA.c_str(), DATA.c_str() };
 
 	for (int nSection = 0; nSection < _countof(pSections); ++nSection) {
 		BYTE* pBase = nullptr;
@@ -2038,7 +2116,7 @@ DEFINE_CODE_IN_SECTION(".load") inline Detours::PRTL_RB_TREE LocateGlobalTreeByR
 }
 
 
-DEFINE_CODE_IN_SECTION(".load") inline Detours::PRTL_RB_TREE GetLdrpModuleIndexBase() {
+DEFINE_CODE_IN_SECTION(".load") Detours::PRTL_RB_TREE GetLdrpModuleIndexBase() {
 	auto pDTE = GetNTDLLDTE();
 	if (!pDTE) {
 		return nullptr;
@@ -2048,7 +2126,7 @@ DEFINE_CODE_IN_SECTION(".load") inline Detours::PRTL_RB_TREE GetLdrpModuleIndexB
 	return LocateGlobalTreeByRoot(pRoot);
 }
 
-DEFINE_CODE_IN_SECTION(".load") static void __set_parent_raw(Detours::PRTL_BALANCED_NODE n, Detours::PRTL_BALANCED_NODE p) {
+DEFINE_CODE_IN_SECTION(".load") void __set_parent_raw(Detours::PRTL_BALANCED_NODE n, Detours::PRTL_BALANCED_NODE p) {
 	if (!n) {
 		return;
 	}
@@ -2062,7 +2140,7 @@ DEFINE_CODE_IN_SECTION(".load") static void __set_parent_raw(Detours::PRTL_BALAN
 	n->ParentValue = reinterpret_cast<ULONG_PTR>(p) | unColor;
 }
 
-DEFINE_CODE_IN_SECTION(".load") inline bool LinkBaseAddressIndex(PLOADER_DATA pLD, Detours::PLDR_DATA_TABLE_ENTRY pDTE) {
+DEFINE_CODE_IN_SECTION(".load") bool LinkBaseAddressIndex(PLOADER_DATA pLD, Detours::PLDR_DATA_TABLE_ENTRY pDTE) {
 	if (!pDTE) {
 		return true;
 	}
@@ -2288,14 +2366,14 @@ DEFINE_CODE_IN_SECTION(".load") bool DetachDdagNode(PLOADER_DATA pLD, Detours::P
 	return true;
 }
 
-DEFINE_CODE_IN_SECTION(".load") __forceinline static void __memzero(void* pBuffer, SIZE_T unSize) {
+DEFINE_CODE_IN_SECTION(".load") void __memzero(void* pBuffer, SIZE_T unSize) {
 	BYTE* b = reinterpret_cast<BYTE*>(pBuffer);
 	for (SIZE_T i = 0; i < unSize; ++i) {
 		b[i] = 0;
 	}
 }
 
-DEFINE_CODE_IN_SECTION(".load") static Detours::PRTL_BALANCED_NODE __parent_of(Detours::PRTL_BALANCED_NODE n) {
+DEFINE_CODE_IN_SECTION(".load") Detours::PRTL_BALANCED_NODE __parent_of(Detours::PRTL_BALANCED_NODE n) {
 #ifdef _WIN64
 	return reinterpret_cast<Detours::PRTL_BALANCED_NODE>(n->ParentValue & ~ULONG_PTR(7));
 #else
@@ -2303,7 +2381,7 @@ DEFINE_CODE_IN_SECTION(".load") static Detours::PRTL_BALANCED_NODE __parent_of(D
 #endif
 }
 
-DEFINE_CODE_IN_SECTION(".load") inline bool UnlinkBaseAddressIndex(PLOADER_DATA pLD, Detours::PLDR_DATA_TABLE_ENTRY pDTE) {
+DEFINE_CODE_IN_SECTION(".load") bool UnlinkBaseAddressIndex(PLOADER_DATA pLD, Detours::PLDR_DATA_TABLE_ENTRY pDTE) {
 	if (!pDTE) {
 		return true;
 	}
@@ -2365,7 +2443,7 @@ DEFINE_CODE_IN_SECTION(".load") inline bool UnlinkBaseAddressIndex(PLOADER_DATA 
 	return true;
 }
 
-DEFINE_CODE_IN_SECTION(".load") inline Detours::PRTL_RB_TREE GetLdrpMappingInfoIndex() {
+DEFINE_CODE_IN_SECTION(".load") Detours::PRTL_RB_TREE GetLdrpMappingInfoIndex() {
 	auto pDTE = GetNTDLLDTE();
 	if (!pDTE) {
 		return nullptr;
@@ -2375,7 +2453,7 @@ DEFINE_CODE_IN_SECTION(".load") inline Detours::PRTL_RB_TREE GetLdrpMappingInfoI
 	return LocateGlobalTreeByRoot(pRoot);
 }
 
-DEFINE_CODE_IN_SECTION(".load") inline bool UnlinkMappingInfoIndex(Detours::PLDR_DATA_TABLE_ENTRY pDTE) {
+DEFINE_CODE_IN_SECTION(".load") bool UnlinkMappingInfoIndex(Detours::PLDR_DATA_TABLE_ENTRY pDTE) {
 	if (!pDTE) {
 		return true;
 	}
@@ -2499,7 +2577,7 @@ DEFINE_CODE_IN_SECTION(".load") bool RemoveFromLDR(PLOADER_DATA pLD) {
 	return true;
 }
 
-DEFINE_CODE_IN_SECTION(".load") static void* GetIFTBase(PLOADER_DATA pLD) {
+DEFINE_CODE_IN_SECTION(".load") void* GetIFTBase(PLOADER_DATA pLD) {
 	if (!pLD) {
 		return nullptr;
 	}
@@ -2509,9 +2587,10 @@ DEFINE_CODE_IN_SECTION(".load") static void* GetIFTBase(PLOADER_DATA pLD) {
 		return nullptr;
 	}
 
-	const char szKiIFTSym[28] = { 75, 105, 85, 115, 101, 114, 73, 110, 118, 101, 114, 116, 101, 100, 70, 117, 110, 99, 116, 105, 111, 110, 84, 97, 98, 108, 101, 0 };
+	auto ProcedureName = STACKSTRING("KiUserInvertedFunctionTable");
+
 	ANSI_STRING as {};
-	pLD->m_pRtlInitAnsiString(&as, szKiIFTSym);
+	pLD->m_pRtlInitAnsiString(&as, ProcedureName.c_str());
 
 	PVOID pAddress = nullptr;
 	if (!NT_SUCCESS(pLD->m_pLdrGetProcedureAddress(pLD->m_hNTDLL, &as, 0, &pAddress))) {
@@ -2524,7 +2603,7 @@ DEFINE_CODE_IN_SECTION(".load") static void* GetIFTBase(PLOADER_DATA pLD) {
 #endif
 }
 
-DEFINE_CODE_IN_SECTION(".load") static bool IFT_OpenView(PLOADER_DATA pLD, IFT_VIEW& v) {
+DEFINE_CODE_IN_SECTION(".load") bool IFT_OpenView(PLOADER_DATA pLD, IFT_VIEW& v) {
 	v.pBase = reinterpret_cast<BYTE*>(GetIFTBase(pLD));
 	if (!v.pBase) {
 		return false;
@@ -2560,7 +2639,7 @@ DEFINE_CODE_IN_SECTION(".load") static bool IFT_OpenView(PLOADER_DATA pLD, IFT_V
 	return true;
 }
 
-DEFINE_CODE_IN_SECTION(".load") static bool IFT_QueryImageInfo(
+DEFINE_CODE_IN_SECTION(".load") bool IFT_QueryImageInfo(
     PVOID pImageBase, ULONG& unSizeOfImage,
 #ifdef _WIN64
     ULONG& unSizeOfTable, ULONG_PTR& unExceptionDirectory
@@ -2584,9 +2663,9 @@ DEFINE_CODE_IN_SECTION(".load") static bool IFT_QueryImageInfo(
 
 	unSizeOfImage = pNTHs->OptionalHeader.SizeOfImage;
 
-	const auto& DD = pNTHs->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
-	DWORD unRVA = DD.VirtualAddress;
-	DWORD unSize = DD.Size;
+	auto pDD = &pNTHs->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
+	DWORD unRVA = pDD->VirtualAddress;
+	DWORD unSize = pDD->Size;
 
 #ifdef _WIN64
 	if (!unRVA || !unSize) {
@@ -2612,7 +2691,7 @@ DEFINE_CODE_IN_SECTION(".load") static bool IFT_QueryImageInfo(
 	return true;
 }
 
-DEFINE_CODE_IN_SECTION(".load") static ULONG IFT_LowerBound(const IFT_ENTRY* pEntry, ULONG unCount, PVOID pImageBase) {
+DEFINE_CODE_IN_SECTION(".load") ULONG IFT_LowerBound(const IFT_ENTRY* pEntry, ULONG unCount, PVOID pImageBase) {
 	ULONG unLow = 0;
 	ULONG unHigh = unCount;
 	ULONG_PTR unKey = reinterpret_cast<ULONG_PTR>(pImageBase);
@@ -2632,11 +2711,11 @@ DEFINE_CODE_IN_SECTION(".load") static ULONG IFT_LowerBound(const IFT_ENTRY* pEn
 	return unLow;
 }
 
-DEFINE_CODE_IN_SECTION(".load") static SIZE_T IFT_RegionBytes(const IFT_VIEW& v) {
+DEFINE_CODE_IN_SECTION(".load") SIZE_T IFT_RegionBytes(const IFT_VIEW& v) {
 	return static_cast<SIZE_T>(v.unEntriesOff) + static_cast<SIZE_T>(v.unMaxCount) * sizeof(IFT_ENTRY);
 }
 
-DEFINE_CODE_IN_SECTION(".load") static bool IFT_ProtectBegin(PLOADER_DATA pLD, IFT_VIEW& v) {
+DEFINE_CODE_IN_SECTION(".load") bool IFT_ProtectBegin(PLOADER_DATA pLD, IFT_VIEW& v) {
 	if (!pLD) {
 		return false;
 	}
@@ -2656,13 +2735,13 @@ DEFINE_CODE_IN_SECTION(".load") static bool IFT_ProtectBegin(PLOADER_DATA pLD, I
 	return true;
 }
 
-DEFINE_CODE_IN_SECTION(".load") static void IFT_BeginWrite(IFT_VIEW& v) {
+DEFINE_CODE_IN_SECTION(".load") void IFT_BeginWrite(IFT_VIEW& v) {
 	if (v.pEpoch) {
 		InterlockedIncrement(reinterpret_cast<volatile LONG*>(v.pEpoch));
 	}
 }
 
-DEFINE_CODE_IN_SECTION(".load") static void* __memmove(void* pDestination, const void* pSource, SIZE_T unSize) {
+DEFINE_CODE_IN_SECTION(".load") void* __memmove(void* pDestination, const void* pSource, SIZE_T unSize) {
 	if (!pDestination || !pSource || !unSize) {
 		return pDestination;
 	}
@@ -2688,13 +2767,13 @@ DEFINE_CODE_IN_SECTION(".load") static void* __memmove(void* pDestination, const
 	return pDst;
 }
 
-DEFINE_CODE_IN_SECTION(".load") static void IFT_EndWrite(IFT_VIEW& v) {
+DEFINE_CODE_IN_SECTION(".load") void IFT_EndWrite(IFT_VIEW& v) {
 	if (v.pEpoch) {
 		InterlockedIncrement(reinterpret_cast<volatile LONG*>(v.pEpoch));
 	}
 }
 
-DEFINE_CODE_IN_SECTION(".load") static void IFT_ProtectEnd(PLOADER_DATA pLD, IFT_VIEW& v) {
+DEFINE_CODE_IN_SECTION(".load") void IFT_ProtectEnd(PLOADER_DATA pLD, IFT_VIEW& v) {
 	if (!pLD || !v.bProtectionActive) {
 		return;
 	}
@@ -2822,12 +2901,12 @@ DEFINE_CODE_IN_SECTION(".load") bool ExecuteTLS(PLOADER_DATA pLD, DWORD unReason
 	auto pDH = reinterpret_cast<PIMAGE_DOS_HEADER>(pLD->m_pImageAddress);
 	auto pNTHs = reinterpret_cast<PIMAGE_NT_HEADERS>((char*)pDH + pDH->e_lfanew);
 
-	auto& DDTLS = pNTHs->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
-	if (!DDTLS.VirtualAddress) {
+	auto pDD = &pNTHs->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
+	if (!pDD->VirtualAddress) {
 		return true;
 	}
 
-	auto pTLS = reinterpret_cast<PIMAGE_TLS_DIRECTORY>(reinterpret_cast<char*>(pDH) + DDTLS.VirtualAddress);
+	auto pTLS = reinterpret_cast<PIMAGE_TLS_DIRECTORY>(reinterpret_cast<char*>(pDH) + pDD->VirtualAddress);
 	auto pCallbacks = reinterpret_cast<PIMAGE_TLS_CALLBACK*>(pTLS->AddressOfCallBacks);
 
 	if (pCallbacks) {
@@ -2851,8 +2930,6 @@ DEFINE_CODE_IN_SECTION(".load") bool CallDllMain(PLOADER_DATA pLD, DWORD unReaso
 
 	return pEntryPoint(reinterpret_cast<HINSTANCE>(pDH), unReason, nullptr) == TRUE;
 }
-
-DEFINE_DATA_IN_SECTION(".load") LOADER_DATA LoaderData;
 
 DEFINE_CODE_IN_SECTION(".load") DWORD WINAPI Loader(LPVOID lpParameter) {
 	SELF_INCLUDE;

@@ -30,6 +30,7 @@
 #include <mutex>
 #include <vector>
 #include <memory>
+#include <unordered_set>
 
 // ----------------------------------------------------------------
 // General definitions
@@ -2293,7 +2294,7 @@ namespace Detours {
 			~Suspender();
 
 		public:
-			bool Suspend();
+			bool Suspend(bool bSweepThreads = true);
 			void Resume();
 			bool IsRegionExecuting(void* pAddress, size_t unSize);
 			bool IsRegionInCallStacks(void* pAddress, size_t unSize);
@@ -2314,6 +2315,10 @@ namespace Detours {
 
 			std::deque<SUSPENDER_DATA> m_Threads;
 			Mutex m_Mutex;
+			size_t m_unSuspendDepth;
+			std::unordered_set<DWORD> m_SuspendedTIDs;
+
+			size_t SuspendNewThreadsSnapshot();
 		};
 
 		extern Suspender g_Suspender;

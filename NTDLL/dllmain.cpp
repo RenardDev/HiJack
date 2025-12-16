@@ -1,4 +1,4 @@
-﻿
+
 #include "framework.h"
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
@@ -12,14 +12,25 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 			}
 
 			DWORD unWritten = 0;
-			WriteConsoleA(hConsole, "Hello, World!\n", 14, &unWritten, nullptr);
+			WriteConsoleA(hConsole, "[DLL_PROCESS_ATTACH] Hello, World!\n", 35, &unWritten, nullptr);
 
 			break;
 		}
 		case DLL_THREAD_ATTACH:
-		case DLL_THREAD_DETACH:
-		case DLL_PROCESS_DETACH:
 			break;
+		case DLL_THREAD_DETACH:
+			break;
+		case DLL_PROCESS_DETACH: {
+			HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+			if (!hConsole || (hConsole == INVALID_HANDLE_VALUE)) {
+				return TRUE;
+			}
+
+			DWORD unWritten = 0;
+			WriteConsoleA(hConsole, "[DLL_PROCESS_DETACH] Hello, World!\n", 35, &unWritten, nullptr);
+
+			break;
+		}
 	}
 
 	return TRUE;
