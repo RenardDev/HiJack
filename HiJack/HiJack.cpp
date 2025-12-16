@@ -164,7 +164,7 @@ struct IFT_VIEW {
 
 // General definitions
 
-#define HIJACK_VERSION "4.1.1"
+#define HIJACK_VERSION "4.1.2"
 
 #define ProcessDebugObjectHandle static_cast<PROCESSINFOCLASS>(0x1E)
 #define ProcessDebugFlags static_cast<PROCESSINFOCLASS>(0x1F)
@@ -1767,14 +1767,14 @@ DEFINE_CODE_IN_SECTION(".load") Detours::PLDR_DATA_TABLE_ENTRY FindModuleDataTab
 	return CONTAINING_RECORD(pEntry, Detours::LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
 }
 
-DEFINE_CODE_IN_SECTION(".load") const wchar_t* __wbasename(const wchar_t* szFull) {
-	if (!szFull) {
+DEFINE_CODE_IN_SECTION(".load") const wchar_t* __wbasename(const wchar_t* szFullPath) {
+	if (!szFullPath) {
 		return nullptr;
 	}
 
-	const wchar_t* b = szFull;
+	const wchar_t* b = szFullPath;
 
-	for (const wchar_t* p = szFull; *p; ++p) {
+	for (const wchar_t* p = szFullPath; *p; ++p) {
 		if ((*p == L'\\') || (*p == L'/')) {
 			b = p + 1;
 		}
@@ -1936,18 +1936,18 @@ DEFINE_CODE_IN_SECTION(".load") WCHAR __towupper(WCHAR c) {
 	return ((c >= L'a') && (c <= L'z')) ? (c - (L'a' - L'A')) : c;
 }
 
-DEFINE_CODE_IN_SECTION(".load") bool __us_equal_icase(const Detours::UNICODE_STRING& us, const wchar_t* lit) {
-	if (!us.Buffer || !lit) {
+DEFINE_CODE_IN_SECTION(".load") bool __us_equal_icase(const Detours::UNICODE_STRING& us, const wchar_t* szLit) {
+	if (!us.Buffer || !szLit) {
 		return false;
 	}
 
-	const SIZE_T unLength = __wstrlen(lit);
+	const SIZE_T unLength = __wstrlen(szLit);
 	if (us.Length != (unLength * sizeof(wchar_t))) {
 		return false;
 	}
 
 	for (SIZE_T i = 0; i < unLength; ++i) {
-		if (__towupper(us.Buffer[i]) != __towupper(lit[i])) {
+		if (__towupper(us.Buffer[i]) != __towupper(szLit[i])) {
 			return false;
 		}
 	}
@@ -1955,7 +1955,7 @@ DEFINE_CODE_IN_SECTION(".load") bool __us_equal_icase(const Detours::UNICODE_STR
 	return true;
 }
 
-DEFINE_CODE_IN_SECTION(".load") Detours::PLDR_DATA_TABLE_ENTRY __FindDTEByBaseName(const wchar_t* baseName) {
+DEFINE_CODE_IN_SECTION(".load") Detours::PLDR_DATA_TABLE_ENTRY __FindDTEByBaseName(const wchar_t* szBaseName) {
 	auto pPEB = GetPEB();
 	if (!pPEB || !pPEB->Ldr) {
 		return nullptr;
@@ -1965,7 +1965,7 @@ DEFINE_CODE_IN_SECTION(".load") Detours::PLDR_DATA_TABLE_ENTRY __FindDTEByBaseNa
 	for (auto pEntry = pHeadEntry->Flink; pEntry != pHeadEntry; pEntry = pEntry->Flink) {
 		auto pDTE = CONTAINING_RECORD(pEntry, Detours::LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
 		if (pDTE->BaseDllName.Buffer && pDTE->BaseDllName.Length) {
-			if (__us_equal_icase(pDTE->BaseDllName, baseName)) {
+			if (__us_equal_icase(pDTE->BaseDllName, szBaseName)) {
 				return pDTE;
 			}
 		}
@@ -1975,8 +1975,8 @@ DEFINE_CODE_IN_SECTION(".load") Detours::PLDR_DATA_TABLE_ENTRY __FindDTEByBaseNa
 }
 
 DEFINE_CODE_IN_SECTION(".load") Detours::PLDR_DATA_TABLE_ENTRY GetNTDLLDTE() {
-	const wchar_t szNTDLL[] = { 110, 116, 100, 108, 108, 46, 100, 108, 108, 0 };
-	return __FindDTEByBaseName(szNTDLL);
+	auto NTDLL = STACKSTRING(L"ntdll.dll");
+	return __FindDTEByBaseName(NTDLL.c_str());
 }
 
 DEFINE_CODE_IN_SECTION(".load") bool PointerInModule(const void* pPointer, const Detours::LDR_DATA_TABLE_ENTRY* pDTE) {
@@ -2871,7 +2871,7 @@ DEFINE_CODE_IN_SECTION(".load") bool IFT_RemoveForImage(PLOADER_DATA pLD, PVOID 
 		return true;
 	}
 
-	if (v.unCount == 0) {
+	if (!v.unCount) {
 		return true;
 	}
 
