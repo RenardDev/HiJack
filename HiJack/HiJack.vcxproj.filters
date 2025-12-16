@@ -26,6 +26,9 @@
     <ClInclude Include="Detours.h">
       <Filter>Файлы заголовков</Filter>
     </ClInclude>
+    <ClInclude Include="CompileStackString.h">
+      <Filter>Файлы заголовков</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="HiJack.suppress" />
