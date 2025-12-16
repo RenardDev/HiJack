@@ -36,6 +36,8 @@
 using tstring = std::basic_string<TCHAR, std::char_traits<TCHAR>, std::allocator<TCHAR>>;
 using tstring_optional = std::pair<bool, tstring>;
 
+using fnDbgPrint = ULONG(NTAPI*)(PCSTR Format, ...);
+
 using fnRtlDosPathNameToNtPathName_U = BOOLEAN(NTAPI*)(PCWSTR DosName, PUNICODE_STRING NtName, PCWSTR* DosFilePath, PUNICODE_STRING NtFilePath);
 
 using fnRtlFreeUnicodeString = void(NTAPI*)(PUNICODE_STRING UnicodeString);
@@ -80,6 +82,8 @@ typedef struct _LOADER_DATA {
 
 	HMODULE m_hNTDLL;
 
+	fnDbgPrint m_pDbgPrint;
+
 	fnRtlDosPathNameToNtPathName_U m_pRtlDosPathNameToNtPathName_U;
 	fnRtlFreeUnicodeString m_pRtlFreeUnicodeString;
 	fnRtlFreeAnsiString m_pRtlFreeAnsiString;
@@ -98,7 +102,6 @@ typedef struct _LOADER_DATA {
 	fnLdrLoadDll m_pLdrLoadDll;
 	fnLdrGetDllHandle m_pLdrGetDllHandle;
 	fnLdrGetProcedureAddress m_pLdrGetProcedureAddress;
-
 	fnRtlHashUnicodeString m_pRtlHashUnicodeString;
 	fnRtlRbInsertNodeEx m_pRtlRbInsertNodeEx;
 	fnRtlRbRemoveNode m_pRtlRbRemoveNode;
@@ -1259,6 +1262,10 @@ bool FillLoaderData(HANDLE hProcess, PLOADER_DATA pLoaderData) {
 	}
 
 	if (!GetRemoteModuleHandle(hProcess, _T("ntdll.dll"), &pLoaderData->m_hNTDLL)) {
+		return false;
+	}
+
+	if (!GetRemoteProcAddress(hProcess, _T("ntdll.dll"), "DbgPrint", &pLoaderData->m_pDbgPrint)) {
 		return false;
 	}
 
@@ -2944,55 +2951,120 @@ DEFINE_CODE_IN_SECTION(".load") DWORD WINAPI Loader(LPVOID lpParameter) {
 		return EXIT_FAILURE;
 	}
 
+#ifdef _DEBUG
+	pLD->m_pDbgPrint(STACKSTRING("LOADER: Initializing image mapping").c_str());
+#endif
+
 	if (!MapImage(pLD)) {
+#ifdef _DEBUG
+		pLD->m_pDbgPrint(STACKSTRING("LOADER: Image mapping failed").c_str());
+#endif
 		return EXIT_FAILURE;
 	}
+
+#ifdef _DEBUG
+	pLD->m_pDbgPrint(STACKSTRING("LOADER: Applying base relocations").c_str());
+#endif
 
 	if (!FixRelocations(pLD)) {
+#ifdef _DEBUG
+		pLD->m_pDbgPrint(STACKSTRING("LOADER: Failed to apply base relocations").c_str());
+#endif
 		SIZE_T unSize = 0;
 		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
 		return EXIT_FAILURE;
 	}
 
-	if (!ResolveImports(pLD)) { // Compile only with /MT, /MTd
+#ifdef _DEBUG
+	pLD->m_pDbgPrint(STACKSTRING("LOADER: Resolving import table").c_str());
+#endif
+
+	if (!ResolveImports(pLD)) {
+#ifdef _DEBUG
+		pLD->m_pDbgPrint(STACKSTRING("LOADER: Failed to resolve import table").c_str());
+#endif
 		SIZE_T unSize = 0;
 		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
 		return EXIT_FAILURE;
 	}
+
+#ifdef _DEBUG
+	pLD->m_pDbgPrint(STACKSTRING("LOADER: Resolving delayed imports").c_str());
+#endif
 
 	if (!ResolveDelayedImports(pLD)) {
+#ifdef _DEBUG
+		pLD->m_pDbgPrint(STACKSTRING("LOADER: Failed to resolve delayed imports").c_str());
+#endif
 		SIZE_T unSize = 0;
 		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
 		return EXIT_FAILURE;
 	}
 
+#ifdef _DEBUG
+	pLD->m_pDbgPrint(STACKSTRING("LOADER: Applying section memory protections").c_str());
+#endif
+
 	if (!ProtectSections(pLD)) {
+#ifdef _DEBUG
+		pLD->m_pDbgPrint(STACKSTRING("LOADER: Failed to apply section protections").c_str());
+#endif
 		SIZE_T unSize = 0;
 		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
 		return EXIT_FAILURE;
 	}
 
 	if (pLD->m_unFlags & HIJACK_FLAGS::HIJACK_FLAG_LDR_LINKING) {
+
+#ifdef _DEBUG
+		pLD->m_pDbgPrint(STACKSTRING("LOADER: Linking image into loader structures").c_str());
+#endif
+
 		if (!AddToLDR(pLD)) {
+#ifdef _DEBUG
+			pLD->m_pDbgPrint(STACKSTRING("LOADER: Failed to link image into loader").c_str());
+#endif
 			SIZE_T unSize = 0;
 			pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
 			return EXIT_FAILURE;
 		}
 
+#ifdef _DEBUG
+		pLD->m_pDbgPrint(STACKSTRING("LOADER: Registering image in inverted function table").c_str());
+#endif
+
 		if (!IFT_InsertForImage(pLD, pLD->m_pImageAddress)) {
+#ifdef _DEBUG
+			pLD->m_pDbgPrint(STACKSTRING("LOADER: Failed to register image in inverted function table").c_str());
+#endif
 			SIZE_T unSize = 0;
 			pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
 			return EXIT_FAILURE;
 		}
 	}
 
+#ifdef _DEBUG
+	pLD->m_pDbgPrint(STACKSTRING("LOADER: Executing TLS callbacks (PROCESS_ATTACH)").c_str());
+#endif
+
 	if (!ExecuteTLS(pLD, DLL_PROCESS_ATTACH)) {
+#ifdef _DEBUG
+		pLD->m_pDbgPrint(STACKSTRING("LOADER: TLS callback execution failed").c_str());
+#endif
 		SIZE_T unSize = 0;
 		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
 		return EXIT_FAILURE;
 	}
 
+#ifdef _DEBUG
+	pLD->m_pDbgPrint(STACKSTRING("LOADER: Invoking DllMain (PROCESS_ATTACH)").c_str());
+#endif
+
 	if (!CallDllMain(pLD, DLL_PROCESS_ATTACH)) {
+#ifdef _DEBUG
+		pLD->m_pDbgPrint(STACKSTRING("LOADER: DllMain returned failure").c_str());
+#endif
+
 		CallDllMain(pLD, DLL_PROCESS_DETACH);
 		ExecuteTLS(pLD, DLL_PROCESS_DETACH);
 
@@ -3007,26 +3079,60 @@ DEFINE_CODE_IN_SECTION(".load") DWORD WINAPI Loader(LPVOID lpParameter) {
 	}
 
 	if (pLD->m_unFlags & HIJACK_FLAGS::HIJACK_FLAG_IMMEDIATELY_UNLOAD) {
+
+#ifdef _DEBUG
+		pLD->m_pDbgPrint(STACKSTRING("LOADER: Immediate unload requested").c_str());
+#endif
+
+#ifdef _DEBUG
+		pLD->m_pDbgPrint(STACKSTRING("LOADER: Invoking DllMain (PROCESS_DETACH)").c_str());
+#endif
+
 		if (!CallDllMain(pLD, DLL_PROCESS_DETACH)) {
+#ifdef _DEBUG
+			pLD->m_pDbgPrint(STACKSTRING("LOADER: DllMain detach failed").c_str());
+#endif
 			SIZE_T unSize = 0;
 			pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
 			return EXIT_FAILURE;
 		}
 
+#ifdef _DEBUG
+		pLD->m_pDbgPrint(STACKSTRING("LOADER: Executing TLS callbacks (PROCESS_DETACH)").c_str());
+#endif
+
 		if (!ExecuteTLS(pLD, DLL_PROCESS_DETACH)) {
+#ifdef _DEBUG
+			pLD->m_pDbgPrint(STACKSTRING("LOADER: TLS callback execution failed").c_str());
+#endif
 			SIZE_T unSize = 0;
 			pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
 			return EXIT_FAILURE;
 		}
 
 		if (pLD->m_unFlags & HIJACK_FLAGS::HIJACK_FLAG_LDR_LINKING) {
+
+#ifdef _DEBUG
+			pLD->m_pDbgPrint(STACKSTRING("LOADER: Unregistering image from inverted function table").c_str());
+#endif
+
 			if (!IFT_RemoveForImage(pLD, pLD->m_pImageAddress)) {
+#ifdef _DEBUG
+				pLD->m_pDbgPrint(STACKSTRING("LOADER: Failed to unregister image from inverted function table").c_str());
+#endif
 				SIZE_T unSize = 0;
 				pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
 				return EXIT_FAILURE;
 			}
 
+#ifdef _DEBUG
+			pLD->m_pDbgPrint(STACKSTRING("LOADER: Unlinking image from loader structures").c_str());
+#endif
+
 			if (!RemoveFromLDR(pLD)) {
+#ifdef _DEBUG
+				pLD->m_pDbgPrint(STACKSTRING("LOADER: Failed to unlink image from loader").c_str());
+#endif
 				SIZE_T unSize = 0;
 				pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
 				return EXIT_FAILURE;
