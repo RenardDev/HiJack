@@ -4065,16 +4065,14 @@ bool HiJackAdd(const TCHAR* szFileName, DWORD unFlags = 0) {
 		return false;
 	}
 
-	if (unFlags) {
-		DWORD unDW = unFlags;
-		if (RegSetValueEx(hKey, _T("HiJackFlags"), 0, REG_DWORD, reinterpret_cast<const BYTE*>(&unDW), sizeof(unDW)) != ERROR_SUCCESS) {
-			_tprintf_s(_T("ERROR: RegSetValueEx (Error = 0x%08X)\n"), GetLastError());
+	DWORD unFlagsDW = unFlags;
+	if (RegSetValueEx(hKey, _T("HiJackFlags"), 0, REG_DWORD, reinterpret_cast<const BYTE*>(&unFlagsDW), sizeof(unFlagsDW)) != ERROR_SUCCESS) {
+		_tprintf_s(_T("ERROR: RegSetValueEx (Error = 0x%08X)\n"), GetLastError());
 #ifndef _UNICODE
-			RtlFreeAnsiString(&as);
+		RtlFreeAnsiString(&as);
 #endif
-			RegCloseKey(hKey);
-			return false;
-		}
+		RegCloseKey(hKey);
+		return false;
 	}
 
 #ifndef _UNICODE
