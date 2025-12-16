@@ -167,7 +167,7 @@ struct IFT_VIEW {
 
 // General definitions
 
-#define HIJACK_VERSION "4.1.2"
+#define HIJACK_VERSION "4.1.3"
 
 #define ProcessDebugObjectHandle static_cast<PROCESSINFOCLASS>(0x1E)
 #define ProcessDebugFlags static_cast<PROCESSINFOCLASS>(0x1F)
