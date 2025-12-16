@@ -2122,7 +2122,6 @@ DEFINE_CODE_IN_SECTION(".load") Detours::PRTL_RB_TREE LocateGlobalTreeByRoot(Det
 	return nullptr;
 }
 
-
 DEFINE_CODE_IN_SECTION(".load") Detours::PRTL_RB_TREE GetLdrpModuleIndexBase() {
 	auto pDTE = GetNTDLLDTE();
 	if (!pDTE) {
