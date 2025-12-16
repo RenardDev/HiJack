@@ -3995,7 +3995,7 @@ bool HiJackList() {
 
 			unType = 0;
 			if ((RegQueryValueEx(hSubKey, _T("HiJackFlags"), nullptr, &unType, reinterpret_cast<LPBYTE>(&unFlags), &unFlagsSize) == ERROR_SUCCESS) && (unType == REG_DWORD) && (unFlagsSize == sizeof(DWORD))) {
-				bHasFlags = true;
+				bHasFlags = unFlags != 0;
 			}
 
 			if (bHasDebugger) {
