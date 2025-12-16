@@ -3202,7 +3202,7 @@ void WriteMiniDump(DWORD unProcessID, DWORD unThreadID, HANDLE hProcess, HANDLE 
 	GetLocalTime(&st);
 
 	TCHAR szDumpPath[MAX_PATH] {};
-	StringCchPrintf(szDumpPath, _countof(szDumpPath), _T("%s\\%s_%lu_%lu_0x%08X_%04u%02u%02u_%02u%02u%02u.dmp"), ProcessDirectory.second.c_str(), (szTag ? szTag : _T("DUMP")), unProcessID, unThreadID, info.ExceptionRecord.ExceptionCode, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+	StringCchPrintf(szDumpPath, _countof(szDumpPath), _T("%s%s_%lu_%lu_0x%08X_%04u%02u%02u_%02u%02u%02u.dmp"), ProcessDirectory.second.c_str(), (szTag ? szTag : _T("DUMP")), unProcessID, unThreadID, info.ExceptionRecord.ExceptionCode, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
 
 	HANDLE hFile = CreateFile(szDumpPath, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
 	if (!hFile || (hFile == INVALID_HANDLE_VALUE)) {
