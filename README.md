@@ -4,8 +4,14 @@ A utility leveraging Windows 10+ mechanisms to intercept process creation by reg
 # Commands
 ```
 HiJack.exe /list
-HiJack.exe /add <File Name>
-HiJack.exe /remove <File Name>
+HiJack.exe /add <File Name> [Flags]
+HiJack.exe /remove <File Name> [Flags]
+```
+
+### Flags
+```
+0x1 - Unload the library immediately after calling DllMain.
+0x2 - Enable LDR linking.
 ```
 
 # Usage
