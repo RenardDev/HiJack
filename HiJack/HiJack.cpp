@@ -3890,8 +3890,10 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 								SafeCloseHandle(tit->second.first);
 								pit->second.erase(tit);
 							}
-							if (pit->second.empty())
+
+							if (pit->second.empty()) {
 								g_Threads.erase(pit);
+							}
 						}
 					}
 
