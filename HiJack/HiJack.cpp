@@ -2065,7 +2065,7 @@ DEFINE_CODE_IN_SECTION(".load") bool FindSection(HMODULE hModule, const char* sz
 		return false;
 	}
 
-	auto pNTHs = (PIMAGE_NT_HEADERS)(reinterpret_cast<char*>(pDH) + pDH->e_lfanew);
+	auto pNTHs = reinterpret_cast<PIMAGE_NT_HEADERS>(reinterpret_cast<char*>(pDH) + pDH->e_lfanew);
 	if (!pNTHs || (pNTHs->Signature != IMAGE_NT_SIGNATURE)) {
 		return false;
 	}
@@ -2680,7 +2680,7 @@ DEFINE_CODE_IN_SECTION(".load") bool IFT_QueryImageInfo(
 		unExceptionDirectory = 0;
 
 	} else {
-		unSizeOfTable = unSize / (DWORD)sizeof(IMAGE_RUNTIME_FUNCTION_ENTRY);
+		unSizeOfTable = unSize / sizeof(IMAGE_RUNTIME_FUNCTION_ENTRY);
 		unExceptionDirectory = reinterpret_cast<ULONG_PTR>(reinterpret_cast<char*>(pImageBase) + unRVA);
 	}
 
