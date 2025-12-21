@@ -23,7 +23,6 @@
 
 DEFINE_SECTION(".load", SECTION_READWRITE)
 
-#define _STACKSTRING_NO_INLINE DEFINE_CODE_IN_SECTION(".load") __declspec(noinline)
 #define _STACKSTRING_FORCE_INLINE DEFINE_CODE_IN_SECTION(".load") __forceinline
 
 namespace StackString {
@@ -36,54 +35,48 @@ namespace StackString {
 
 	template <typename T>
 	struct ByteIO<T, 1> {
-		_STACKSTRING_FORCE_INLINE
-		static constexpr void to(T value, unsigned char (&out)[1]) noexcept {
-			out[0] = static_cast<unsigned char>(value);
+		_STACKSTRING_FORCE_INLINE static constexpr void to(T Value, unsigned char (&out)[1]) noexcept {
+			out[0] = static_cast<unsigned char>(Value);
 		}
 
-		_STACKSTRING_FORCE_INLINE
-		static constexpr T from(const unsigned char (&in)[1]) noexcept {
+		_STACKSTRING_FORCE_INLINE static constexpr T from(const unsigned char (&in)[1]) noexcept {
 			return static_cast<T>(in[0]);
 		}
 	};
 
 	template <typename T>
 	struct ByteIO<T, 2> {
-		_STACKSTRING_FORCE_INLINE
-		static constexpr void to(T value, unsigned char (&out)[2]) noexcept {
-			const unsigned short x = static_cast<unsigned short>(value);
-			out[0] = static_cast<unsigned char>(x & 0xFF);
-			out[1] = static_cast<unsigned char>((x >> 8) & 0xFF);
+		_STACKSTRING_FORCE_INLINE static constexpr void to(T Value, unsigned char (&out)[2]) noexcept {
+			const unsigned short unX = static_cast<unsigned short>(Value);
+			out[0] = static_cast<unsigned char>( unX       & 0xFF);
+			out[1] = static_cast<unsigned char>((unX >> 8) & 0xFF);
 		}
 
-		_STACKSTRING_FORCE_INLINE
-		static constexpr T from(const unsigned char (&in)[2]) noexcept {
-			const unsigned short x =
-			    static_cast<unsigned short>(in[0]) |
-			    (static_cast<unsigned short>(in[1]) << 8);
-			return static_cast<T>(x);
+		_STACKSTRING_FORCE_INLINE static constexpr T from(const unsigned char (&in)[2]) noexcept {
+			const unsigned short unX =
+				 static_cast<unsigned short>(in[0]) |
+				(static_cast<unsigned short>(in[1]) << 8);
+			return static_cast<T>(unX);
 		}
 	};
 
 	template <typename T>
 	struct ByteIO<T, 4> {
-		_STACKSTRING_FORCE_INLINE
-		static constexpr void to(T value, unsigned char (&out)[4]) noexcept {
-			const unsigned int x = static_cast<unsigned int>(value);
-			out[0] = static_cast<unsigned char>(x & 0xFF);
-			out[1] = static_cast<unsigned char>((x >> 8) & 0xFF);
-			out[2] = static_cast<unsigned char>((x >> 16) & 0xFF);
-			out[3] = static_cast<unsigned char>((x >> 24) & 0xFF);
+		_STACKSTRING_FORCE_INLINE static constexpr void to(T Value, unsigned char (&out)[4]) noexcept {
+			const unsigned int unX = static_cast<unsigned int>(Value);
+			out[0] = static_cast<unsigned char>( unX        & 0xFF);
+			out[1] = static_cast<unsigned char>((unX >>  8) & 0xFF);
+			out[2] = static_cast<unsigned char>((unX >> 16) & 0xFF);
+			out[3] = static_cast<unsigned char>((unX >> 24) & 0xFF);
 		}
 
-		_STACKSTRING_FORCE_INLINE
-		static constexpr T from(const unsigned char (&in)[4]) noexcept {
-			const unsigned int x =
-			    static_cast<unsigned int>(in[0]) |
-			    (static_cast<unsigned int>(in[1]) << 8) |
-			    (static_cast<unsigned int>(in[2]) << 16) |
-			    (static_cast<unsigned int>(in[3]) << 24);
-			return static_cast<T>(x);
+		_STACKSTRING_FORCE_INLINE static constexpr T from(const unsigned char (&in)[4]) noexcept {
+			const unsigned int unX =
+				 static_cast<unsigned int>(in[0])        |
+				(static_cast<unsigned int>(in[1]) <<  8) |
+				(static_cast<unsigned int>(in[2]) << 16) |
+				(static_cast<unsigned int>(in[3]) << 24);
+			return static_cast<T>(unX);
 		}
 	};
 
@@ -96,8 +89,7 @@ namespace StackString {
 	public:
 		class DecryptedString {
 		public:
-			_STACKSTRING_FORCE_INLINE
-			explicit DecryptedString(const StackString& enc) noexcept {
+			_STACKSTRING_FORCE_INLINE explicit DecryptedString(const StackString& enc) noexcept {
 				for (std::size_t i = 0; i < kLength; ++i) {
 					unsigned char tmp[sizeof(T)] {};
 
@@ -110,28 +102,30 @@ namespace StackString {
 				}
 			}
 
-			_STACKSTRING_FORCE_INLINE
-			~DecryptedString() noexcept {
+			_STACKSTRING_FORCE_INLINE ~DecryptedString() noexcept {
 				Clear();
 			}
 
 			DecryptedString(const DecryptedString&) = delete;
 			DecryptedString& operator=(const DecryptedString&) = delete;
 
-			_STACKSTRING_FORCE_INLINE
-			DecryptedString(DecryptedString&& other) noexcept {
-				for (std::size_t i = 0; i < kLength; ++i)
+			_STACKSTRING_FORCE_INLINE DecryptedString(DecryptedString&& other) noexcept {
+				for (std::size_t i = 0; i < kLength; ++i) {
 					m_pBuffer[i] = other.m_pBuffer[i];
+				}
+
 				other.Clear();
 			}
 
-			_STACKSTRING_FORCE_INLINE
-			DecryptedString& operator=(DecryptedString&& other) noexcept {
+			_STACKSTRING_FORCE_INLINE DecryptedString& operator=(DecryptedString&& other) noexcept {
 				if (this != &other) {
-					for (std::size_t i = 0; i < kLength; ++i)
+					for (std::size_t i = 0; i < kLength; ++i) {
 						m_pBuffer[i] = other.m_pBuffer[i];
+					}
+
 					other.Clear();
 				}
+
 				return *this;
 			}
 
@@ -154,8 +148,9 @@ namespace StackString {
 		private:
 			_STACKSTRING_FORCE_INLINE void Clear() noexcept {
 				volatile T* p = m_pBuffer;
-				for (std::size_t i = 0; i < kLength; ++i)
+				for (std::size_t i = 0; i < kLength; ++i) {
 					p[i] = T {};
+				}
 			}
 
 			T m_pBuffer[kLength] {};
@@ -175,8 +170,7 @@ namespace StackString {
 			}
 		}
 
-		_STACKSTRING_FORCE_INLINE
-		DecryptedString Decrypt() const noexcept {
+		_STACKSTRING_FORCE_INLINE DecryptedString Decrypt() const noexcept {
 			return DecryptedString(*this);
 		}
 
