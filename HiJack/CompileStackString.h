@@ -157,7 +157,7 @@ namespace StackString {
 		};
 
 		_STACKSTRING_FORCE_INLINE constexpr StackString(T* pData) noexcept {
-			static_assert(sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4, "Unsupported character size");
+			static_assert((sizeof(T) == 1) || (sizeof(T) == 2) || (sizeof(T) == 4), "Unsupported character size");
 
 			for (std::size_t i = 0; i < kLength; ++i) {
 				unsigned char bytes[sizeof(T)] {};
