@@ -91,7 +91,7 @@ namespace StackString {
 		public:
 			_STACKSTRING_FORCE_INLINE explicit DecryptedString(const StackString& enc) noexcept {
 				for (std::size_t i = 0; i < kLength; ++i) {
-					unsigned char tmp[sizeof(T)] {};
+					unsigned char tmp[sizeof(T)];
 
 					for (std::size_t k = 0; k < sizeof(T); ++k) {
 						const std::size_t j = i * sizeof(T) + k;
@@ -153,7 +153,7 @@ namespace StackString {
 				}
 			}
 
-			T m_pBuffer[kLength] {};
+			T m_pBuffer[kLength];
 		};
 
 		_STACKSTRING_FORCE_INLINE constexpr StackString(T* pData) noexcept {

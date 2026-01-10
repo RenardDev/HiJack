@@ -167,7 +167,7 @@ struct IFT_VIEW {
 
 // General definitions
 
-#define HIJACK_VERSION "4.1.3"
+#define HIJACK_VERSION "4.1.4"
 
 #define ProcessDebugObjectHandle static_cast<PROCESSINFOCLASS>(0x1E)
 #define ProcessDebugFlags static_cast<PROCESSINFOCLASS>(0x1F)
@@ -179,6 +179,7 @@ struct IFT_VIEW {
 
 EXTERN_C NTSYSCALLAPI NTSTATUS NTAPI NtFlushInstructionCache(HANDLE ProcessHandle, PVOID BaseAddress, ULONG NumberOfBytesToFlush);
 EXTERN_C NTSYSCALLAPI NTSTATUS NTAPI NtSetInformationProcess(_In_ HANDLE ProcessHandle, _In_ PROCESSINFOCLASS ProcessInformationClass, _In_reads_bytes_(ProcessInformationLength) PVOID ProcessInformation, _In_ ULONG ProcessInformationLength);
+EXTERN_C NTSYSCALLAPI NTSTATUS NTAPI NtSuspendProcess(HANDLE ProcessHandle);
 EXTERN_C NTSYSCALLAPI NTSTATUS NTAPI NtResumeProcess(HANDLE ProcessHandle);
 EXTERN_C NTSYSCALLAPI NTSTATUS NTAPI NtRemoveProcessDebug(IN HANDLE ProcessHandle, IN HANDLE DebugObjectHandle);
 
@@ -1709,8 +1710,7 @@ DEFINE_CODE_IN_SECTION(".load") bool ProtectSections(PLOADER_DATA pLD) {
 	auto pFirstSection = IMAGE_FIRST_SECTION(pNTHs);
 	for (WORD i = 0; i < pNTHs->FileHeader.NumberOfSections; ++i) {
 		DWORD unCharacteristics = pFirstSection[i].Characteristics;
-		DWORD unProtection = (unCharacteristics & IMAGE_SCN_MEM_EXECUTE) ? ((unCharacteristics & IMAGE_SCN_MEM_WRITE) ? PAGE_EXECUTE_READWRITE : PAGE_EXECUTE_READ) : (unCharacteristics & IMAGE_SCN_MEM_WRITE) ? PAGE_READWRITE
-		                                                                                                                                                                                       : (unCharacteristics & IMAGE_SCN_MEM_READ ? PAGE_READONLY : PAGE_NOACCESS);
+		DWORD unProtection = (unCharacteristics & IMAGE_SCN_MEM_EXECUTE) ? ((unCharacteristics & IMAGE_SCN_MEM_WRITE) ? PAGE_EXECUTE_READWRITE : PAGE_EXECUTE_READ) : (unCharacteristics & IMAGE_SCN_MEM_WRITE) ? PAGE_READWRITE : (unCharacteristics & IMAGE_SCN_MEM_READ ? PAGE_READONLY : PAGE_NOACCESS);
 		PVOID unAddress = reinterpret_cast<PVOID>((reinterpret_cast<char*>(pDH) + pFirstSection[i].VirtualAddress));
 		SIZE_T unSize = pFirstSection[i].Misc.VirtualSize ? pFirstSection[i].Misc.VirtualSize : pFirstSection[i].SizeOfRawData;
 		if (!unSize) {
@@ -4990,9 +4990,8 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 		return EXIT_FAILURE;
 	}
 
-	DWORD unSuspendCount = SuspendThread(pi.hThread);
-	if ((unSuspendCount != 0) && (unSuspendCount != 1)) { // Allow main thread suspension
-		_tprintf_s(_T("ERROR: SuspendThread (Error = 0x%08X)\n"), GetLastError());
+	if (!NT_SUCCESS(NtSuspendProcess(pi.hProcess))) {
+		_tprintf_s(_T("ERROR: SuspendProcess (Error = 0x%08X)\n"), GetLastError());
 		TerminateProcess(pi.hProcess, EXIT_FAILURE);
 		CloseHandle(pi.hThread);
 		CloseHandle(pi.hProcess);
@@ -5054,9 +5053,8 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 		return EXIT_FAILURE;
 	}
 
-	unSuspendCount = ResumeThread(pi.hThread);
-	if ((unSuspendCount != 1) && (unSuspendCount != 2)) { // Allow main thread suspension
-		_tprintf_s(_T("ERROR: ResumeThread (Error = 0x%08X)\n"), GetLastError());
+	if (!NT_SUCCESS(NtResumeProcess(pi.hProcess))) {
+		_tprintf_s(_T("ERROR: ResumeProcess (Error = 0x%08X)\n"), GetLastError());
 		TerminateProcess(pi.hProcess, EXIT_FAILURE);
 		CloseHandle(pi.hThread);
 		CloseHandle(pi.hProcess);
