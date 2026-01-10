@@ -298,7 +298,7 @@ bool IsRunningAsAdmin() {
 }
 
 bool ReLaunchAsAdmin(bool bAllowCancel = false) {
-	TCHAR szPath[MAX_PATH];
+	TCHAR szPath[MAX_PATH] {};
 	if (!GetModuleFileName(NULL, szPath, MAX_PATH)) {
 		return false;
 	}
@@ -380,7 +380,7 @@ tstring_optional GetProcessPath(HANDLE hProcess) {
 
 				bFound = (_tcsnicmp(szProcessPath, szName, unNameLength) == 0) && (*(szProcessPath + unNameLength) == _T('\\'));
 				if (bFound) {
-					TCHAR szTempFile[MAX_PATH];
+					TCHAR szTempFile[MAX_PATH] {};
 					StringCchPrintf(szTempFile, MAX_PATH, TEXT("%s%s"), szDrive, szProcessPath + unNameLength);
 					StringCchCopyN(szProcessPath, MAX_PATH + 1, szTempFile, _tcslen(szTempFile));
 				}
@@ -487,7 +487,7 @@ tstring_optional GetFilePath(HANDLE hFile) {
 
 				bFound = (_tcsnicmp(szFilePath, szName, unNameLength) == 0) && (*(szFilePath + unNameLength) == _T('\\'));
 				if (bFound) {
-					TCHAR szTempFile[MAX_PATH];
+					TCHAR szTempFile[MAX_PATH] {};
 					StringCchPrintf(szTempFile, MAX_PATH, TEXT("%s%s"), szDrive, szFilePath + unNameLength);
 					StringCchCopyN(szFilePath, MAX_PATH + 1, szTempFile, _tcslen(szTempFile));
 				}
