@@ -277,7 +277,7 @@ std::unordered_map<DWORD, HANDLE> g_ProcessInjectionThreads;
 
 bool g_bContinueDebugging = true;
 HIJACK_FLAGS g_unHiJackFlags = HIJACK_FLAG_NONE;
-bool g_bGlobalDisableThreadLibraryCalls = false;
+bool g_bDisableThreadLibraryCalls = false;
 
 bool IsRunningAsAdmin() {
 	SID_IDENTIFIER_AUTHORITY NT_AUTHORITY = SECURITY_NT_AUTHORITY;
@@ -3221,7 +3221,7 @@ void OnExitThreadEvent(DWORD unProcessID, DWORD unThreadID, DWORD unExitCode) {
 
 				RestoreAllProcessBreakPoints(unProcessID);
 
-				g_bGlobalDisableThreadLibraryCalls = false;
+				g_bDisableThreadLibraryCalls = false;
 				g_bContinueDebugging = false;
 			}
 
@@ -3512,7 +3512,7 @@ bool OnTLSCallBackEvent(DWORD unProcessID, DWORD unThreadID, LPVOID pCallback, L
 
 	bool bRedirected = false;
 
-	if (g_bGlobalDisableThreadLibraryCalls && ((unReason == 2) || (unReason == 3))) {
+	if (g_bDisableThreadLibraryCalls && ((unReason == 2) || (unReason == 3))) {
 		auto iit = g_ProcessInjectionThreads.find(unProcessID);
 		if ((iit != g_ProcessInjectionThreads.end()) && (GetThreadId(iit->second) == unThreadID)) {
 			LPVOID pStub = EnsureStub(unProcessID, Process);
@@ -3559,7 +3559,7 @@ bool OnDLLEntryPoint(DWORD unProcessID, DWORD unThreadID, LPVOID pEntryPoint, LP
 
 	bool bRedirected = false;
 
-	if (g_bGlobalDisableThreadLibraryCalls && ((unReason == 2) || (unReason == 3))) {
+	if (g_bDisableThreadLibraryCalls && ((unReason == 2) || (unReason == 3))) {
 		auto iit = g_ProcessInjectionThreads.find(unProcessID);
 		if ((iit != g_ProcessInjectionThreads.end()) && (GetThreadId(iit->second) == unThreadID)) {
 			LPVOID pStub = EnsureStub(unProcessID, Process);
@@ -3625,7 +3625,7 @@ void OnEntryPoint(DWORD unProcessID, DWORD unThreadID) {
 		auto HiJackDirectory = GetProcessDirectory(GetCurrentProcess());
 		if (!HiJackDirectory.first) {
 			RestoreAllProcessBreakPoints(unProcessID);
-			g_bGlobalDisableThreadLibraryCalls = false;
+			g_bDisableThreadLibraryCalls = false;
 			g_bContinueDebugging = false;
 			return;
 		}
@@ -3635,7 +3635,7 @@ void OnEntryPoint(DWORD unProcessID, DWORD unThreadID) {
 		DWORD unAttributes = GetFileAttributes(ProcessHiJackLibraryPath.c_str());
 		if (!((unAttributes != INVALID_FILE_ATTRIBUTES) && !(unAttributes & FILE_ATTRIBUTE_DIRECTORY))) { // The file does not exist in the HiJack directory
 			RestoreAllProcessBreakPoints(unProcessID);
-			g_bGlobalDisableThreadLibraryCalls = false;
+			g_bDisableThreadLibraryCalls = false;
 			g_bContinueDebugging = false;
 			return;
 		}
@@ -3812,7 +3812,7 @@ void OnEntryPoint(DWORD unProcessID, DWORD unThreadID) {
 
 	HANDLE hThread = CreateRemoteThread(Process, nullptr, 0, reinterpret_cast<LPTHREAD_START_ROUTINE>(pRemoteLoader), pRemoteLoaderData, 0, nullptr);
 	if (hThread && (hThread != INVALID_HANDLE_VALUE)) {
-		g_bGlobalDisableThreadLibraryCalls = true;
+		g_bDisableThreadLibraryCalls = true;
 		g_ProcessInjectionThreads[unProcessID] = hThread;
 	}
 }
