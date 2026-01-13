@@ -167,13 +167,13 @@ struct IFT_VIEW {
 
 // General definitions
 
-#define HIJACK_VERSION "4.1.5"
+#define HIJACK_VERSION "4.1.6"
 
 #define ProcessDebugObjectHandle static_cast<PROCESSINFOCLASS>(0x1E)
 #define ProcessDebugFlags static_cast<PROCESSINFOCLASS>(0x1F)
-#define SafeCloseHandle(X)                    \
-	if ((X) && (X != INVALID_HANDLE_VALUE)) { \
-		CloseHandle(X);                       \
+#define SafeCloseHandle(X)                      \
+	if ((X) && ((X) != INVALID_HANDLE_VALUE)) { \
+		CloseHandle(X);                         \
 	}
 #define FileStandardInformation static_cast<FILE_INFORMATION_CLASS>(5)
 
@@ -3211,8 +3211,9 @@ void OnExitThreadEvent(DWORD unProcessID, DWORD unThreadID, DWORD unExitCode) {
 	_tprintf_s(_T("THREADEXIT(%lu, %lu): %lu\n"), unProcessID, unThreadID, unExitCode);
 #endif // _DEBUG
 
-	if ((g_ProcessInjectionThreads.find(unProcessID) != g_ProcessInjectionThreads.end()) && (g_ProcessSuspendedMainThreads.find(unProcessID) != g_ProcessSuspendedMainThreads.end())) {
-		if (GetThreadId(g_ProcessInjectionThreads[unProcessID]) == unThreadID) {
+	auto iit = g_ProcessInjectionThreads.find(unProcessID);
+	if ((iit != g_ProcessInjectionThreads.end()) && (g_ProcessSuspendedMainThreads.find(unProcessID) != g_ProcessSuspendedMainThreads.end())) {
+		if (GetThreadId(iit->second) == unThreadID) {
 			if (!unExitCode) {
 #ifdef _DEBUG
 				_tprintf_s(_T("INJECTED!\n"));
@@ -3512,19 +3513,22 @@ bool OnTLSCallBackEvent(DWORD unProcessID, DWORD unThreadID, LPVOID pCallback, L
 	bool bRedirected = false;
 
 	if (g_bGlobalDisableThreadLibraryCalls && ((unReason == 2) || (unReason == 3))) {
-		LPVOID pStub = EnsureStub(unProcessID, Process);
-		if (pStub) {
-			CONTEXT ctx {};
-			ctx.ContextFlags = CONTEXT_CONTROL;
-			if (GetThreadContext(Thread, &ctx)) {
+		auto iit = g_ProcessInjectionThreads.find(unProcessID);
+		if ((iit != g_ProcessInjectionThreads.end()) && (GetThreadId(iit->second) == unThreadID)) {
+			LPVOID pStub = EnsureStub(unProcessID, Process);
+			if (pStub) {
+				CONTEXT ctx {};
+				ctx.ContextFlags = CONTEXT_CONTROL;
+				if (GetThreadContext(Thread, &ctx)) {
 #ifdef _WIN64
-				ctx.Rip = reinterpret_cast<DWORD64>(pStub);
+					ctx.Rip = reinterpret_cast<DWORD64>(pStub);
 #else
-				ctx.Eip = reinterpret_cast<DWORD64>(pStub);
+					ctx.Eip = reinterpret_cast<DWORD64>(pStub);
 #endif
 
-				if (SetThreadContext(Thread, &ctx)) {
-					bRedirected = true;
+					if (SetThreadContext(Thread, &ctx)) {
+						bRedirected = true;
+					}
 				}
 			}
 		}
@@ -3556,19 +3560,22 @@ bool OnDLLEntryPoint(DWORD unProcessID, DWORD unThreadID, LPVOID pEntryPoint, LP
 	bool bRedirected = false;
 
 	if (g_bGlobalDisableThreadLibraryCalls && ((unReason == 2) || (unReason == 3))) {
-		LPVOID pStub = EnsureStub(unProcessID, Process);
-		if (pStub) {
-			CONTEXT ctx {};
-			ctx.ContextFlags = CONTEXT_CONTROL;
-			if (GetThreadContext(Thread, &ctx)) {
+		auto iit = g_ProcessInjectionThreads.find(unProcessID);
+		if ((iit != g_ProcessInjectionThreads.end()) && (GetThreadId(iit->second) == unThreadID)) {
+			LPVOID pStub = EnsureStub(unProcessID, Process);
+			if (pStub) {
+				CONTEXT ctx {};
+				ctx.ContextFlags = CONTEXT_CONTROL;
+				if (GetThreadContext(Thread, &ctx)) {
 #ifdef _WIN64
-				ctx.Rip = reinterpret_cast<DWORD64>(pStub);
+					ctx.Rip = reinterpret_cast<DWORD64>(pStub);
 #else
-				ctx.Eip = reinterpret_cast<DWORD64>(pStub);
+					ctx.Eip = reinterpret_cast<DWORD64>(pStub);
 #endif
 
-				if (SetThreadContext(Thread, &ctx)) {
-					bRedirected = true;
+					if (SetThreadContext(Thread, &ctx)) {
+						bRedirected = true;
+					}
 				}
 			}
 		}
@@ -3613,11 +3620,25 @@ void OnEntryPoint(DWORD unProcessID, DWORD unThreadID) {
 
 	auto ProcessHiJackLibraryPath = ProcessDirectory.second + ProcessInjectLibraryName.second;
 
-	DWORD dwAttrib = GetFileAttributes(ProcessHiJackLibraryPath.c_str());
-	if (!((dwAttrib != INVALID_FILE_ATTRIBUTES) && !(dwAttrib & FILE_ATTRIBUTE_DIRECTORY))) { // File not exist
-		RestoreAllProcessBreakPoints(unProcessID);
-		g_bContinueDebugging = false;
-		return;
+	DWORD unAttributes = GetFileAttributes(ProcessHiJackLibraryPath.c_str());
+	if (!((unAttributes != INVALID_FILE_ATTRIBUTES) && !(unAttributes & FILE_ATTRIBUTE_DIRECTORY))) { // The file does not exist in the target process directory
+		auto HiJackDirectory = GetProcessDirectory(GetCurrentProcess());
+		if (!HiJackDirectory.first) {
+			RestoreAllProcessBreakPoints(unProcessID);
+			g_bGlobalDisableThreadLibraryCalls = false;
+			g_bContinueDebugging = false;
+			return;
+		}
+
+		ProcessHiJackLibraryPath = HiJackDirectory.second + ProcessInjectLibraryName.second;
+
+		DWORD unAttributes = GetFileAttributes(ProcessHiJackLibraryPath.c_str());
+		if (!((unAttributes != INVALID_FILE_ATTRIBUTES) && !(unAttributes & FILE_ATTRIBUTE_DIRECTORY))) { // The file does not exist in the HiJack directory
+			RestoreAllProcessBreakPoints(unProcessID);
+			g_bGlobalDisableThreadLibraryCalls = false;
+			g_bContinueDebugging = false;
+			return;
+		}
 	}
 
 	HANDLE hFile = CreateFile(ProcessHiJackLibraryPath.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -4772,8 +4793,8 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 			return EXIT_FAILURE;
 		}
 
-		DWORD dwAttrib = GetFileAttributes(szProcessPath);
-		if (!((dwAttrib != INVALID_FILE_ATTRIBUTES) && !(dwAttrib & FILE_ATTRIBUTE_DIRECTORY))) {
+		DWORD unAttributes = GetFileAttributes(szProcessPath);
+		if (!((unAttributes != INVALID_FILE_ATTRIBUTES) && !(unAttributes & FILE_ATTRIBUTE_DIRECTORY))) {
 			_tprintf_s(_T("ERROR: This process cannot be run!\n"));
 			CloseHandle(hJob);
 			return EXIT_FAILURE;
@@ -4895,8 +4916,8 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 			return EXIT_FAILURE;
 		}
 
-		DWORD dwAttrib = GetFileAttributes(szProcessPath);
-		if (!((dwAttrib != INVALID_FILE_ATTRIBUTES) && !(dwAttrib & FILE_ATTRIBUTE_DIRECTORY))) {
+		DWORD unAttributes = GetFileAttributes(szProcessPath);
+		if (!((unAttributes != INVALID_FILE_ATTRIBUTES) && !(unAttributes & FILE_ATTRIBUTE_DIRECTORY))) {
 			_tprintf_s(_T("ERROR: This process cannot be run!\n"));
 			CloseHandle(hJob);
 			return EXIT_FAILURE;
