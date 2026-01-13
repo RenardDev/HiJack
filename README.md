@@ -19,7 +19,7 @@ To intercept a process, such as hello.exe, execute the following command:
 ```
 HiJack.exe /add hello.exe
 ```
-This will enable HiJack to intercept the process creation of `hello.exe` and inject the library `<File Name>_hijack.dll` (e.g., `hello_hijack.dll` or `hello_hijack32.dll` if the process is 32-bit). The DLL must be located in the same directory as the intercepted executable.
+This will enable HiJack to intercept the process creation of `hello.exe` and inject the library `<File Name>_hijack.dll` (e.g., `hello_hijack.dll` or `hello_hijack32.dll` if the process is 32-bit). The DLL file must be located in the same directory as the intercepted executable file, but it is also acceptable for the DLL to be located in the same directory as HiJack.
 
 # NOTE
 * Ensure that you use the appropriate version of HiJack:
