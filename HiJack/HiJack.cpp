@@ -167,7 +167,7 @@ struct IFT_VIEW {
 
 // General definitions
 
-#define HIJACK_VERSION "4.1.4"
+#define HIJACK_VERSION "4.1.5"
 
 #define ProcessDebugObjectHandle static_cast<PROCESSINFOCLASS>(0x1E)
 #define ProcessDebugFlags static_cast<PROCESSINFOCLASS>(0x1F)
@@ -356,6 +356,37 @@ bool EnableDebugPrivilege(HANDLE hProcess, bool bEnable) {
 	}
 
 	CloseHandle(hToken);
+	return true;
+}
+
+bool BuildCurrentDirectoryFromFilePath(const TCHAR* szFilePath, TCHAR* pOutDirectory, size_t unOutSize) {
+	if (!szFilePath || !pOutDirectory || !unOutSize) {
+		return false;
+	}
+
+	TCHAR szFull[MAX_PATH] {};
+	DWORD unLength = GetFullPathName(szFilePath, _countof(szFull), szFull, nullptr);
+	if (!unLength || (unLength >= _countof(szFull))) {
+		return false;
+	}
+
+	TCHAR* pLastSlash = _tcsrchr(szFull, _T('\\'));
+	if (!pLastSlash) {
+		pLastSlash = _tcsrchr(szFull, _T('/'));
+	}
+
+	if (!pLastSlash) {
+		return false;
+	}
+
+	*pLastSlash = _T('\0');
+
+	if ((_tcslen(szFull) + 1) > (unOutSize - 1)) {
+		return false;
+	}
+
+	StringCchCopy(pOutDirectory, unOutSize - 1, szFull);
+
 	return true;
 }
 
@@ -559,7 +590,13 @@ bool CreateStandardProcess(const TCHAR* szFileName, PTCHAR szCommandLine, PROCES
 	STARTUPINFO si {};
 	si.cb = sizeof(si);
 
-	if (!CreateProcess(szFileName, szCommandLine, nullptr, nullptr, TRUE, DEBUG_ONLY_THIS_PROCESS | CREATE_SUSPENDED, nullptr, nullptr, &si, &pi)) {
+	TCHAR szCurrentDirectory[MAX_PATH] {};
+	const TCHAR* pCurrentDirectory = nullptr;
+	if (BuildCurrentDirectoryFromFilePath(szFileName, szCurrentDirectory, _countof(szCurrentDirectory))) {
+		pCurrentDirectory = szCurrentDirectory;
+	}
+
+	if (!CreateProcess(szFileName, szCommandLine, nullptr, nullptr, TRUE, DEBUG_ONLY_THIS_PROCESS | CREATE_SUSPENDED, nullptr, pCurrentDirectory, &si, &pi)) {
 		_tprintf_s(_T("ERROR: CreateProcess (Error = 0x%08X)\n"), GetLastError());
 		return false;
 	}
@@ -584,7 +621,13 @@ bool CreateProcessWithParent(const TCHAR* szFileName, PTCHAR szCommandLine, HAND
 	}
 	*/
 
-	if (!CreateProcess(szFileName, szCommandLine, nullptr, nullptr, TRUE, DEBUG_ONLY_THIS_PROCESS | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr, &si.StartupInfo, &pi)) {
+	TCHAR szCurrentDirectory[MAX_PATH] {};
+	const TCHAR* pCurrentDirectory = nullptr;
+	if (BuildCurrentDirectoryFromFilePath(szFileName, szCurrentDirectory, _countof(szCurrentDirectory))) {
+		pCurrentDirectory = szCurrentDirectory;
+	}
+
+	if (!CreateProcess(szFileName, szCommandLine, nullptr, nullptr, TRUE, DEBUG_ONLY_THIS_PROCESS | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, nullptr, pCurrentDirectory, &si.StartupInfo, &pi)) {
 		_tprintf_s(_T("ERROR: CreateProcess (Error = 0x%08X)\n"), GetLastError());
 		//DeleteProcThreadAttributeList(si.lpAttributeList);
 		//HeapFree(GetProcessHeap(), 0, si.lpAttributeList);
