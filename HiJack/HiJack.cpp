@@ -332,7 +332,7 @@ bool ReLaunchAsAdmin(bool bAllowCancel = false) {
 
 bool EnableDebugPrivilege(HANDLE hProcess, bool bEnable) {
 	HANDLE hToken = nullptr;
-	if (!OpenProcessToken(hProcess, TOKEN_ADJUST_PRIVILEGES, &hToken)) {
+	if (!OpenProcessToken(hProcess, TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken)) {
 		_tprintf_s(_T("ERROR: OpenProcessToken (Error = 0x%08X)\n"), GetLastError());
 		return false;
 	}
@@ -347,10 +347,18 @@ bool EnableDebugPrivilege(HANDLE hProcess, bool bEnable) {
 	TOKEN_PRIVILEGES tp {};
 	tp.PrivilegeCount = 1;
 	tp.Privileges[0].Luid = luid;
-	tp.Privileges[0].Attributes = bEnable ? SE_PRIVILEGE_ENABLED : SE_PRIVILEGE_REMOVED;
+	tp.Privileges[0].Attributes = bEnable ? SE_PRIVILEGE_ENABLED : 0;
 
+	SetLastError(ERROR_SUCCESS);
 	if (!AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(tp), nullptr, nullptr)) {
 		_tprintf_s(_T("ERROR: AdjustTokenPrivileges (Error = 0x%08X)\n"), GetLastError());
+		CloseHandle(hToken);
+		return false;
+	}
+
+	const DWORD unLastError = GetLastError();
+	if (unLastError == ERROR_NOT_ALL_ASSIGNED) {
+		_tprintf_s(_T("ERROR: AdjustTokenPrivileges (Error = 0x%08X)\n"), unLastError);
 		CloseHandle(hToken);
 		return false;
 	}
@@ -381,11 +389,13 @@ bool BuildCurrentDirectoryFromFilePath(const TCHAR* szFilePath, TCHAR* pOutDirec
 
 	*pLastSlash = _T('\0');
 
-	if ((_tcslen(szFull) + 1) > (unOutSize - 1)) {
+	if ((_tcslen(szFull) + 1) > unOutSize) {
 		return false;
 	}
 
-	StringCchCopy(pOutDirectory, unOutSize - 1, szFull);
+	if (FAILED(StringCchCopy(pOutDirectory, unOutSize, szFull))) {
+		return false;
+	}
 
 	return true;
 }
@@ -1753,7 +1763,8 @@ DEFINE_CODE_IN_SECTION(".load") bool ProtectSections(PLOADER_DATA pLD) {
 	auto pFirstSection = IMAGE_FIRST_SECTION(pNTHs);
 	for (WORD i = 0; i < pNTHs->FileHeader.NumberOfSections; ++i) {
 		DWORD unCharacteristics = pFirstSection[i].Characteristics;
-		DWORD unProtection = (unCharacteristics & IMAGE_SCN_MEM_EXECUTE) ? ((unCharacteristics & IMAGE_SCN_MEM_WRITE) ? PAGE_EXECUTE_READWRITE : PAGE_EXECUTE_READ) : (unCharacteristics & IMAGE_SCN_MEM_WRITE) ? PAGE_READWRITE : (unCharacteristics & IMAGE_SCN_MEM_READ ? PAGE_READONLY : PAGE_NOACCESS);
+		DWORD unProtection = (unCharacteristics & IMAGE_SCN_MEM_EXECUTE) ? ((unCharacteristics & IMAGE_SCN_MEM_WRITE) ? PAGE_EXECUTE_READWRITE : PAGE_EXECUTE_READ) : (unCharacteristics & IMAGE_SCN_MEM_WRITE) ? PAGE_READWRITE
+		                                                                                                                                                                                                        : (unCharacteristics & IMAGE_SCN_MEM_READ ? PAGE_READONLY : PAGE_NOACCESS);
 		PVOID unAddress = reinterpret_cast<PVOID>((reinterpret_cast<char*>(pDH) + pFirstSection[i].VirtualAddress));
 		SIZE_T unSize = pFirstSection[i].Misc.VirtualSize ? pFirstSection[i].Misc.VirtualSize : pFirstSection[i].SizeOfRawData;
 		if (!unSize) {
@@ -4563,7 +4574,7 @@ DWORD HiJackQueryFlags(const TCHAR* szPath) {
 					RegCloseKey(hSubKey);
 					RegCloseKey(hIFEO);
 					return unFlags;
-				} 
+				}
 
 				RegCloseKey(hSubKey);
 				RegCloseKey(hIFEO);
@@ -4702,6 +4713,19 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 		return EXIT_FAILURE;
 	}
 
+	LARGE_INTEGER FileSize {};
+	if (!GetFileSizeEx(hFile, &FileSize)) {
+		_tprintf_s(_T("ERROR: GetFileSizeEx (Error = 0x%08X)\n"), GetLastError());
+		CloseHandle(hFile);
+		return EXIT_FAILURE;
+	}
+
+	if ((FileSize.QuadPart <= 0) || (static_cast<ULONGLONG>(FileSize.QuadPart) > static_cast<ULONGLONG>(SIZE_T(-1)))) {
+		_tprintf_s(_T("ERROR: Invalid file size!\n"));
+		CloseHandle(hFile);
+		return EXIT_FAILURE;
+	}
+
 	HANDLE hMapFile = CreateFileMapping(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
 	if (!hMapFile || (hMapFile == INVALID_HANDLE_VALUE)) {
 		_tprintf_s(_T("ERROR: CreateFileMapping (Error = 0x%08X)\n"), GetLastError());
@@ -4717,7 +4741,32 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 		return EXIT_FAILURE;
 	}
 
+	const size_t unFileSize = static_cast<size_t>(FileSize.QuadPart);
+	if (unFileSize < sizeof(IMAGE_DOS_HEADER)) {
+		_tprintf_s(_T("ERROR: Invalid PE header!\n"));
+		UnmapViewOfFile(pMap);
+		CloseHandle(hMapFile);
+		CloseHandle(hFile);
+		return EXIT_FAILURE;
+	}
+
 	PIMAGE_DOS_HEADER pDH = reinterpret_cast<PIMAGE_DOS_HEADER>(pMap);
+	if (pDH->e_magic != IMAGE_DOS_SIGNATURE) {
+		_tprintf_s(_T("ERROR: Invalid PE header!\n"));
+		UnmapViewOfFile(pMap);
+		CloseHandle(hMapFile);
+		CloseHandle(hFile);
+		return EXIT_FAILURE;
+	}
+
+	if ((pDH->e_lfanew < 0) || (unFileSize < (sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER) + sizeof(WORD))) || (static_cast<size_t>(pDH->e_lfanew) > (unFileSize - (sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER) + sizeof(WORD))))) {
+		_tprintf_s(_T("ERROR: Invalid PE header!\n"));
+		UnmapViewOfFile(pMap);
+		CloseHandle(hMapFile);
+		CloseHandle(hFile);
+		return EXIT_FAILURE;
+	}
+
 	PIMAGE_NT_HEADERS pTempNTHs = reinterpret_cast<PIMAGE_NT_HEADERS>(reinterpret_cast<char*>(pDH) + pDH->e_lfanew);
 	if (pTempNTHs->Signature != IMAGE_NT_SIGNATURE) {
 		_tprintf_s(_T("ERROR: Invalid PE header!\n"));
@@ -4730,6 +4779,9 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 	HANDLE hJob = CreateJobObject(nullptr, nullptr);
 	if (!hJob || (hJob == INVALID_HANDLE_VALUE)) {
 		_tprintf_s(_T("ERROR: CreateJobObject (Error = 0x%08X)\n"), GetLastError());
+		UnmapViewOfFile(pMap);
+		CloseHandle(hMapFile);
+		CloseHandle(hFile);
 		return EXIT_FAILURE;
 	}
 
@@ -4738,6 +4790,9 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 	if (!SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, &joli, sizeof(joli))) {
 		_tprintf_s(_T("ERROR: SetInformationJobObject (Error = 0x%08X)\n"), GetLastError());
 		CloseHandle(hJob);
+		UnmapViewOfFile(pMap);
+		CloseHandle(hMapFile);
+		CloseHandle(hFile);
 		return EXIT_FAILURE;
 	}
 
@@ -4837,11 +4892,23 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 			return EXIT_FAILURE;
 		}
 
+		CloseHandle(pi.hThread);
+		CloseHandle(pi.hProcess);
+		CloseHandle(hJob);
 		return unExitCode;
 	}
 
 	if (pTempNTHs->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64) {
 		_tprintf_s(_T("ERROR: This process cannot be run in 64 bit!\n"));
+		UnmapViewOfFile(pMap);
+		CloseHandle(hMapFile);
+		CloseHandle(hFile);
+		CloseHandle(hJob);
+		return EXIT_FAILURE;
+	}
+
+	if ((unFileSize < sizeof(IMAGE_NT_HEADERS64)) || (static_cast<size_t>(pDH->e_lfanew) > (unFileSize - sizeof(IMAGE_NT_HEADERS64)))) {
+		_tprintf_s(_T("ERROR: Invalid PE header!\n"));
 		UnmapViewOfFile(pMap);
 		CloseHandle(hMapFile);
 		CloseHandle(hFile);
@@ -4962,11 +5029,23 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 			return EXIT_FAILURE;
 		}
 
+		CloseHandle(pi.hThread);
+		CloseHandle(pi.hProcess);
+		CloseHandle(hJob);
 		return unExitCode;
 	}
 
 	if (pTempNTHs->FileHeader.Machine != IMAGE_FILE_MACHINE_I386) {
 		_tprintf_s(_T("ERROR: This process cannot be run in 32 bit!\n"));
+		UnmapViewOfFile(pMap);
+		CloseHandle(hMapFile);
+		CloseHandle(hFile);
+		CloseHandle(hJob);
+		return EXIT_FAILURE;
+	}
+
+	if ((unFileSize < sizeof(IMAGE_NT_HEADERS32)) || (static_cast<size_t>(pDH->e_lfanew) > (unFileSize - sizeof(IMAGE_NT_HEADERS32)))) {
+		_tprintf_s(_T("ERROR: Invalid PE header!\n"));
 		UnmapViewOfFile(pMap);
 		CloseHandle(hMapFile);
 		CloseHandle(hFile);
@@ -5089,7 +5168,7 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 	HANDLE hDebug = nullptr;
 	nStatus = NtQueryInformationProcess(pi.hProcess, ProcessDebugObjectHandle, &hDebug, sizeof(HANDLE), nullptr);
 	if (!NT_SUCCESS(nStatus)) {
-		_tprintf_s(_T("ERROR: NtQueryInformationProcess (Error = 0x%08X)\n"), GetLastError());
+		_tprintf_s(_T("ERROR: NtQueryInformationProcess (Error = 0x%08X)\n"), nStatus);
 		TerminateProcess(pi.hProcess, EXIT_FAILURE);
 		CloseHandle(pi.hThread);
 		CloseHandle(pi.hProcess);
@@ -5099,8 +5178,9 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 
 	nStatus = NtRemoveProcessDebug(pi.hProcess, hDebug);
 	if (!NT_SUCCESS(nStatus)) {
-		_tprintf_s(_T("ERROR: NtRemoveProcessDebug (Error = 0x%08X)\n"), GetLastError());
+		_tprintf_s(_T("ERROR: NtRemoveProcessDebug (Error = 0x%08X)\n"), nStatus);
 		TerminateProcess(pi.hProcess, EXIT_FAILURE);
+		CloseHandle(hDebug);
 		CloseHandle(pi.hThread);
 		CloseHandle(pi.hProcess);
 		CloseHandle(hJob);
