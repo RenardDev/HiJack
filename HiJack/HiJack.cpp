@@ -657,16 +657,16 @@ bool CreateProcessWithParent(const TCHAR* szFileName, PTCHAR szCommandLine, HAND
 	STARTUPINFOEX si {};
 	si.StartupInfo.cb = sizeof(si);
 
-	SIZE_T attrSize = 0;
-	InitializeProcThreadAttributeList(nullptr, 1, 0, &attrSize);
-	si.lpAttributeList = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(HeapAlloc(GetProcessHeap(), 0, attrSize));
-	if (!si.lpAttributeList ||
-		!InitializeProcThreadAttributeList(si.lpAttributeList, 1, 0, &attrSize) ||
-		!UpdateProcThreadAttribute(si.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_PARENT_PROCESS, &hParentProcess, sizeof(HANDLE), nullptr, nullptr)) {
-		_tprintf_s(_T("ERROR: Failed to set up process attributes (Error = 0x%08X)\n"), GetLastError());
-		HeapFree(GetProcessHeap(), 0, si.lpAttributeList);
-		return false;
-	}
+	//SIZE_T attrSize = 0;
+	//InitializeProcThreadAttributeList(nullptr, 1, 0, &attrSize);
+	//si.lpAttributeList = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(HeapAlloc(GetProcessHeap(), 0, attrSize));
+	//if (!si.lpAttributeList ||
+	//	!InitializeProcThreadAttributeList(si.lpAttributeList, 1, 0, &attrSize) ||
+	//	!UpdateProcThreadAttribute(si.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_PARENT_PROCESS, &hParentProcess, sizeof(HANDLE), nullptr, nullptr)) {
+	//	_tprintf_s(_T("ERROR: Failed to set up process attributes (Error = 0x%08X)\n"), GetLastError());
+	//	HeapFree(GetProcessHeap(), 0, si.lpAttributeList);
+	//	return false;
+	//}
 
 	TCHAR szCurrentDirectory[MAX_PATH] {};
 	const TCHAR* pCurrentDirectory = nullptr;
