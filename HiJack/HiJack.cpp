@@ -15,6 +15,7 @@
 
 // C++
 #include <clocale>
+#include <cerrno>
 
 // STL
 #include <type_traits>
@@ -25,6 +26,7 @@
 #include <algorithm>
 #include <cwctype>
 #include <cctype>
+#include <limits>
 
 // Detours
 #include "Detours.h"
@@ -32,7 +34,20 @@
 // CompileStackString
 #include "CompileStackString.h"
 
+// General definitions
+
+#define HIJACK_VERSION "5.0.0"
+
+#define ProcessDebugObjectHandle static_cast<PROCESSINFOCLASS>(0x1E)
+#define ProcessDebugFlags static_cast<PROCESSINFOCLASS>(0x1F)
+#define SafeCloseHandle(X)                      \
+	if ((X) && ((X) != INVALID_HANDLE_VALUE)) { \
+		CloseHandle(X);                         \
+	}
+#define FileStandardInformation static_cast<FILE_INFORMATION_CLASS>(5)
+
 // Types
+
 using tstring = std::basic_string<TCHAR, std::char_traits<TCHAR>, std::allocator<TCHAR>>;
 using tstring_optional = std::pair<bool, tstring>;
 
@@ -69,11 +84,15 @@ using fnRtlRbRemoveNode = VOID(NTAPI*)(Detours::PRTL_RB_TREE, Detours::PRTL_BALA
 
 using fnDllMain = BOOL(WINAPI*)(HINSTANCE, DWORD, LPVOID);
 
+// Enums
+
 enum HIJACK_FLAGS : unsigned char {
 	HIJACK_FLAG_NONE = 0,
 	HIJACK_FLAG_IMMEDIATELY_UNLOAD = 1,
 	HIJACK_FLAG_LDR_LINKING = 2
 };
+
+// Structures
 
 typedef struct _LOADER_DATA {
 	HIJACK_FLAGS m_unFlags;
@@ -165,17 +184,7 @@ struct IFT_VIEW {
 	bool bProtectionActive = false;
 };
 
-// General definitions
-
-#define HIJACK_VERSION "4.1.6"
-
-#define ProcessDebugObjectHandle static_cast<PROCESSINFOCLASS>(0x1E)
-#define ProcessDebugFlags static_cast<PROCESSINFOCLASS>(0x1F)
-#define SafeCloseHandle(X)                      \
-	if ((X) && ((X) != INVALID_HANDLE_VALUE)) { \
-		CloseHandle(X);                         \
-	}
-#define FileStandardInformation static_cast<FILE_INFORMATION_CLASS>(5)
+// Extern + Data
 
 EXTERN_C NTSYSCALLAPI NTSTATUS NTAPI NtFlushInstructionCache(HANDLE ProcessHandle, PVOID BaseAddress, ULONG NumberOfBytesToFlush);
 EXTERN_C NTSYSCALLAPI NTSTATUS NTAPI NtSetInformationProcess(_In_ HANDLE ProcessHandle, _In_ PROCESSINFOCLASS ProcessInformationClass, _In_reads_bytes_(ProcessInformationLength) PVOID ProcessInformation, _In_ ULONG ProcessInformationLength);
@@ -305,17 +314,32 @@ bool ReLaunchAsAdmin(bool bAllowCancel = false) {
 	}
 
 	LPCTSTR szCommandLine = GetCommandLine();
-	LPCTSTR szArguments = _tcschr(szCommandLine, _T(' '));
-	if (!szArguments) {
-		_tprintf_s(_T("ERROR: _tcsstr\n"));
-		return false;
+	LPCTSTR szArguments = szCommandLine;
+	if (*szArguments == _T('"')) {
+		++szArguments;
+		while (*szArguments && (*szArguments != _T('"'))) {
+			++szArguments;
+		}
+
+		if (*szArguments == _T('"')) {
+			++szArguments;
+		}
+	} else {
+		while (*szArguments && !_istspace(*szArguments)) {
+			++szArguments;
+		}
+	}
+
+	while (*szArguments && _istspace(*szArguments)) {
+		++szArguments;
 	}
 
 	SHELLEXECUTEINFO sei {};
 	sei.cbSize = sizeof(sei);
+	sei.fMask = SEE_MASK_NOCLOSEPROCESS;
 	sei.lpVerb = _T("runas");
 	sei.lpFile = szPath;
-	sei.lpParameters = szArguments;
+	sei.lpParameters = *szArguments ? szArguments : nullptr;
 	sei.nShow = SW_NORMAL;
 
 	if (!ShellExecuteEx(&sei)) {
@@ -327,7 +351,15 @@ bool ReLaunchAsAdmin(bool bAllowCancel = false) {
 		return false;
 	}
 
-	return true;
+	if (!sei.hProcess) {
+		return true;
+	}
+
+	const DWORD unWaitResult = WaitForSingleObject(sei.hProcess, INFINITE);
+	DWORD unExitCode = EXIT_FAILURE;
+	const bool bSuccess = (unWaitResult == WAIT_OBJECT_0) && GetExitCodeProcess(sei.hProcess, &unExitCode) && (unExitCode == EXIT_SUCCESS);
+	CloseHandle(sei.hProcess);
+	return bSuccess;
 }
 
 bool EnableDebugPrivilege(HANDLE hProcess, bool bEnable) {
@@ -358,9 +390,12 @@ bool EnableDebugPrivilege(HANDLE hProcess, bool bEnable) {
 
 	const DWORD unLastError = GetLastError();
 	if (unLastError == ERROR_NOT_ALL_ASSIGNED) {
-		_tprintf_s(_T("ERROR: AdjustTokenPrivileges (Error = 0x%08X)\n"), unLastError);
+		if (bEnable) {
+			_tprintf_s(_T("WARNING: SeDebugPrivilege is not assigned to this token; continuing without it.\n"));
+		}
+
 		CloseHandle(hToken);
-		return false;
+		return true;
 	}
 
 	CloseHandle(hToken);
@@ -387,7 +422,11 @@ bool BuildCurrentDirectoryFromFilePath(const TCHAR* szFilePath, TCHAR* pOutDirec
 		return false;
 	}
 
-	*pLastSlash = _T('\0');
+	if ((pLastSlash == (szFull + 2)) && (szFull[1] == _T(':'))) {
+		pLastSlash[1] = _T('\0');
+	} else {
+		*pLastSlash = _T('\0');
+	}
 
 	if ((_tcslen(szFull) + 1) > unOutSize) {
 		return false;
@@ -408,7 +447,7 @@ tstring_optional GetProcessPath(HANDLE hProcess) {
 	}
 
 	TCHAR szTemp[MAX_PATH * 2] {};
-	if (GetLogicalDriveStrings(MAX_PATH - 1, szTemp)) {
+	if (GetLogicalDriveStrings(_countof(szTemp), szTemp)) {
 		TCHAR szName[MAX_PATH] {};
 		TCHAR szDrive[3] = _T(" :");
 		bool bFound = false;
@@ -515,7 +554,7 @@ tstring_optional GetFilePath(HANDLE hFile) {
 	CloseHandle(hFileMap);
 
 	TCHAR szTemp[MAX_PATH * 2] {};
-	if (GetLogicalDriveStrings(MAX_PATH - 1, szTemp)) {
+	if (GetLogicalDriveStrings(_countof(szTemp), szTemp)) {
 		TCHAR szName[MAX_PATH] {};
 		TCHAR szDrive[3] = _T(" :");
 		bool bFound = false;
@@ -618,18 +657,16 @@ bool CreateProcessWithParent(const TCHAR* szFileName, PTCHAR szCommandLine, HAND
 	STARTUPINFOEX si {};
 	si.StartupInfo.cb = sizeof(si);
 
-	/* FIXME: Changing parent is unstable and currently impossible to redirect stdin/stdout in right way
 	SIZE_T attrSize = 0;
-	InitializeProcThreadAttributeList(nullptr, 2, 0, &attrSize);
+	InitializeProcThreadAttributeList(nullptr, 1, 0, &attrSize);
 	si.lpAttributeList = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(HeapAlloc(GetProcessHeap(), 0, attrSize));
 	if (!si.lpAttributeList ||
-		!InitializeProcThreadAttributeList(si.lpAttributeList, 2, 0, &attrSize) ||
+		!InitializeProcThreadAttributeList(si.lpAttributeList, 1, 0, &attrSize) ||
 		!UpdateProcThreadAttribute(si.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_PARENT_PROCESS, &hParentProcess, sizeof(HANDLE), nullptr, nullptr)) {
 		_tprintf_s(_T("ERROR: Failed to set up process attributes (Error = 0x%08X)\n"), GetLastError());
 		HeapFree(GetProcessHeap(), 0, si.lpAttributeList);
 		return false;
 	}
-	*/
 
 	TCHAR szCurrentDirectory[MAX_PATH] {};
 	const TCHAR* pCurrentDirectory = nullptr;
@@ -639,18 +676,18 @@ bool CreateProcessWithParent(const TCHAR* szFileName, PTCHAR szCommandLine, HAND
 
 	if (!CreateProcess(szFileName, szCommandLine, nullptr, nullptr, TRUE, DEBUG_ONLY_THIS_PROCESS | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, nullptr, pCurrentDirectory, &si.StartupInfo, &pi)) {
 		_tprintf_s(_T("ERROR: CreateProcess (Error = 0x%08X)\n"), GetLastError());
-		//DeleteProcThreadAttributeList(si.lpAttributeList);
-		//HeapFree(GetProcessHeap(), 0, si.lpAttributeList);
+		DeleteProcThreadAttributeList(si.lpAttributeList);
+		HeapFree(GetProcessHeap(), 0, si.lpAttributeList);
 		return false;
 	}
 
-	//DeleteProcThreadAttributeList(si.lpAttributeList);
-	//HeapFree(GetProcessHeap(), 0, si.lpAttributeList);
+	DeleteProcThreadAttributeList(si.lpAttributeList);
+	HeapFree(GetProcessHeap(), 0, si.lpAttributeList);
 	return true;
 }
 
 bool CreateDebugProcess(const TCHAR* szFileName, PTCHAR szCommandLine, HANDLE hJob, PPROCESS_INFORMATION pProcessInfo) {
-	if (!szFileName) {
+	if (!szFileName || !pProcessInfo) {
 		return false;
 	}
 
@@ -673,6 +710,7 @@ bool CreateDebugProcess(const TCHAR* szFileName, PTCHAR szCommandLine, HANDLE hJ
 	auto ProcessName = GetProcessName(hParentProcess);
 	if (ProcessName.second == _T("wininit.exe")) {
 		_tprintf_s(_T("ERROR: Parent process is `wininit.exe`!\n"));
+		SafeCloseHandle(hParentProcess);
 		return false;
 	}
 
@@ -688,6 +726,7 @@ bool CreateDebugProcess(const TCHAR* szFileName, PTCHAR szCommandLine, HANDLE hJ
 		}
 	} else {
 		if (!CreateProcessWithParent(szFileName, szCommandLine, hParentProcess, pi)) {
+			CloseHandle(hParentProcess);
 			return false;
 		}
 
@@ -695,6 +734,11 @@ bool CreateDebugProcess(const TCHAR* szFileName, PTCHAR szCommandLine, HANDLE hJ
 	}
 
 	if (!pi.hProcess || !pi.hThread) {
+		if (pi.hProcess) {
+			TerminateProcess(pi.hProcess, EXIT_FAILURE);
+		}
+		SafeCloseHandle(pi.hThread);
+		SafeCloseHandle(pi.hProcess);
 		return false;
 	}
 
@@ -710,15 +754,17 @@ bool CreateDebugProcess(const TCHAR* szFileName, PTCHAR szCommandLine, HANDLE hJ
 
 	if (SuspendThread(pi.hThread) != 1) {
 		_tprintf_s(_T("ERROR: SuspendThread (Error = 0x%08X)\n"), GetLastError());
-		CloseHandle(pi.hThread);
-		CloseHandle(pi.hProcess);
+		TerminateProcess(pi.hProcess, EXIT_FAILURE);
+		SafeCloseHandle(pi.hThread);
+		SafeCloseHandle(pi.hProcess);
 		return false;
 	}
 
 	if (!NT_SUCCESS(NtResumeProcess(pi.hProcess))) {
 		_tprintf_s(_T("ERROR: NtResumeProcess (Error = 0x%08X)\n"), GetLastError());
-		CloseHandle(pi.hThread);
-		CloseHandle(pi.hProcess);
+		TerminateProcess(pi.hProcess, EXIT_FAILURE);
+		SafeCloseHandle(pi.hThread);
+		SafeCloseHandle(pi.hProcess);
 		return false;
 	}
 
@@ -1257,15 +1303,22 @@ bool GetRemoteModuleHandle(HANDLE hProcess, const TCHAR* szModuleName, HMODULE* 
 	}
 
 	const size_t unModuleNameLength = _tcsclen(szModuleName);
+	if (!unModuleNameLength) {
+		return false;
+	}
 
 	HMODULE hModules[1024] {};
 	DWORD cbNeeded = 0;
 
 	if (EnumProcessModules(hProcess, hModules, sizeof(hModules), &cbNeeded)) {
-		for (DWORD i = 0; i < (cbNeeded / sizeof(HMODULE)); ++i) {
+		const size_t unModuleCount = (std::min)(static_cast<size_t>(_countof(hModules)), static_cast<size_t>(cbNeeded) / sizeof(HMODULE));
+		for (size_t i = 0; i < unModuleCount; ++i) {
 			TCHAR szName[MAX_PATH] {};
 			if (GetModuleFileNameEx(hProcess, hModules[i], szName, MAX_PATH)) {
-				if (_tcsicmp(szName + _tcsclen(szName) - unModuleNameLength, szModuleName) == 0) {
+				const size_t unNameLength = _tcsclen(szName);
+				if ((unModuleNameLength <= unNameLength) &&
+					((unModuleNameLength == unNameLength) || (szName[unNameLength - unModuleNameLength - 1] == _T('\\')) || (szName[unNameLength - unModuleNameLength - 1] == _T('/'))) &&
+					(_tcsicmp(szName + unNameLength - unModuleNameLength, szModuleName) == 0)) {
 
 					if (phModule) {
 						*phModule = hModules[i];
@@ -1412,8 +1465,12 @@ bool FillLoaderData(HANDLE hProcess, PLOADER_DATA pLoaderData) {
 
 DEFINE_DATA_IN_SECTION(".load") LOADER_DATA LoaderData;
 
-DEFINE_CODE_IN_SECTION(".load") SIZE_T __align_up(SIZE_T v, SIZE_T a) {
-	return (v + a - 1) & ~(a - 1);
+DEFINE_CODE_IN_SECTION(".load") SIZE_T __align_up(SIZE_T unV, SIZE_T unA) {
+	if (!unA || (unV > (static_cast<SIZE_T>(-1) - (unA - 1)))) {
+		return 0;
+	}
+
+	return (unV + unA - 1) & ~(unA - 1);
 }
 
 DEFINE_CODE_IN_SECTION(".load") bool MapImage(PLOADER_DATA pLD) {
@@ -1426,6 +1483,10 @@ DEFINE_CODE_IN_SECTION(".load") bool MapImage(PLOADER_DATA pLD) {
 
 	PVOID pDesiredBase = reinterpret_cast<PVOID>(pNTHs->OptionalHeader.ImageBase);
 	SIZE_T unSizeOfImage = pNTHs->OptionalHeader.SizeOfImage;
+	SIZE_T unZero = 0;
+	if (!unSizeOfImage || !pNTHs->OptionalHeader.SizeOfHeaders || (pNTHs->OptionalHeader.SizeOfHeaders > unSizeOfImage)) {
+		return false;
+	}
 
 	if (!NT_SUCCESS(pLD->m_pNtAllocateVirtualMemory(reinterpret_cast<HANDLE>(-1), &pDesiredBase, 0, &unSizeOfImage, MEM_RESERVE, PAGE_READWRITE))) {
 		pDesiredBase = nullptr;
@@ -1437,43 +1498,52 @@ DEFINE_CODE_IN_SECTION(".load") bool MapImage(PLOADER_DATA pLD) {
 
 	PVOID pHeaders = pDesiredBase;
 	SIZE_T unSizeOfHeaders = __align_up(pNTHs->OptionalHeader.SizeOfHeaders, 0x1000);
-	if (!NT_SUCCESS(pLD->m_pNtAllocateVirtualMemory(reinterpret_cast<HANDLE>(-1), &pHeaders, 0, &unSizeOfHeaders, MEM_COMMIT, PAGE_READWRITE))) {
-		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pDesiredBase, &unSizeOfImage, MEM_RELEASE);
+	if (!unSizeOfHeaders || (unSizeOfHeaders > unSizeOfImage) || !NT_SUCCESS(pLD->m_pNtAllocateVirtualMemory(reinterpret_cast<HANDLE>(-1), &pHeaders, 0, &unSizeOfHeaders, MEM_COMMIT, PAGE_READWRITE))) {
+		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pDesiredBase, &unZero, MEM_RELEASE);
 		return false;
 	}
 
-	if (!NT_SUCCESS(pLD->m_pNtWriteVirtualMemory(reinterpret_cast<HANDLE>(-1), pDesiredBase, pDH, pNTHs->OptionalHeader.SizeOfHeaders, nullptr))) {
-		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pDesiredBase, &unSizeOfImage, MEM_RELEASE);
+	ULONG unHeadersWritten = 0;
+	if (!NT_SUCCESS(pLD->m_pNtWriteVirtualMemory(reinterpret_cast<HANDLE>(-1), pDesiredBase, pDH, pNTHs->OptionalHeader.SizeOfHeaders, &unHeadersWritten)) || (unHeadersWritten != pNTHs->OptionalHeader.SizeOfHeaders)) {
+		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pDesiredBase, &unZero, MEM_RELEASE);
 		return false;
 	}
 
 	auto pFirstSection = IMAGE_FIRST_SECTION(pNTHs);
 	for (WORD i = 0; i < pNTHs->FileHeader.NumberOfSections; ++i) {
-		SIZE_T unCommitSize = pFirstSection[i].Misc.VirtualSize ? pFirstSection[i].Misc.VirtualSize : pFirstSection[i].SizeOfRawData;
+		SIZE_T unCommitSize = (pFirstSection[i].Misc.VirtualSize > pFirstSection[i].SizeOfRawData) ? pFirstSection[i].Misc.VirtualSize : pFirstSection[i].SizeOfRawData;
 		if (!unCommitSize) {
 			continue;
 		}
 
 		unCommitSize = __align_up(unCommitSize, 0x1000);
+		if (!unCommitSize || (pFirstSection[i].VirtualAddress > unSizeOfImage) || (unCommitSize > (unSizeOfImage - pFirstSection[i].VirtualAddress))) {
+			pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pDesiredBase, &unZero, MEM_RELEASE);
+			return false;
+		}
 
 		PVOID pSectionAddress = reinterpret_cast<PVOID>(reinterpret_cast<ULONG_PTR>(pDesiredBase) + pFirstSection[i].VirtualAddress);
 		if (!NT_SUCCESS(pLD->m_pNtAllocateVirtualMemory(reinterpret_cast<HANDLE>(-1), &pSectionAddress, 0, &unCommitSize, MEM_COMMIT, PAGE_READWRITE))) {
-			pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pDesiredBase, &unSizeOfImage, MEM_RELEASE);
+			pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pDesiredBase, &unZero, MEM_RELEASE);
 			return false;
 		}
 
 		ULONG unToCopy = pFirstSection[i].SizeOfRawData;
 		if (unToCopy) {
 			PVOID pSectionData = reinterpret_cast<PVOID>(reinterpret_cast<ULONG_PTR>(pDH) + pFirstSection[i].PointerToRawData);
-			if (!NT_SUCCESS(pLD->m_pNtWriteVirtualMemory(reinterpret_cast<HANDLE>(-1), pSectionAddress, pSectionData, unToCopy, nullptr))) {
-				pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pDesiredBase, &unSizeOfImage, MEM_RELEASE);
+			ULONG unWritten = 0;
+			if (!NT_SUCCESS(pLD->m_pNtWriteVirtualMemory(reinterpret_cast<HANDLE>(-1), pSectionAddress, pSectionData, unToCopy, &unWritten)) || (unWritten != unToCopy)) {
+				pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pDesiredBase, &unZero, MEM_RELEASE);
 				return false;
 			}
 		}
 	}
 
-	SIZE_T unZero = 0;
-	pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unZero, MEM_RELEASE);
+	if (!NT_SUCCESS(pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unZero, MEM_RELEASE))) {
+		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pDesiredBase, &unZero, MEM_RELEASE);
+		return false;
+	}
+
 	pLD->m_pImageAddress = pDesiredBase;
 
 	return true;
@@ -1502,10 +1572,35 @@ DEFINE_CODE_IN_SECTION(".load") bool FixRelocations(PLOADER_DATA pLD) {
 	}
 
 	const WORD unMachine = pNTHs->FileHeader.Machine;
+	const SIZE_T unImageSize = pNTHs->OptionalHeader.SizeOfImage;
+	if ((pDD->VirtualAddress > unImageSize) || (pDD->Size > (unImageSize - pDD->VirtualAddress))) {
+		return false;
+	}
 
-	auto pRelocation = reinterpret_cast<PIMAGE_BASE_RELOCATION>((reinterpret_cast<char*>(pDH) + pDD->VirtualAddress));
-	while (pRelocation->VirtualAddress && pRelocation->SizeOfBlock) {
-		DWORD_PTR unBase = reinterpret_cast<DWORD_PTR>(pDH) + pRelocation->VirtualAddress;
+	const ULONG_PTR unImageBase = reinterpret_cast<ULONG_PTR>(pDH);
+	const ULONG_PTR unRelocationStart = unImageBase + pDD->VirtualAddress;
+	const ULONG_PTR unRelocationEnd = unRelocationStart + pDD->Size;
+	ULONG_PTR unRelocationCurrent = unRelocationStart;
+
+	while (unRelocationCurrent < unRelocationEnd) {
+		if ((unRelocationEnd - unRelocationCurrent) < sizeof(IMAGE_BASE_RELOCATION)) {
+			return false;
+		}
+
+		auto pRelocation = reinterpret_cast<PIMAGE_BASE_RELOCATION>(unRelocationCurrent);
+		if (!pRelocation->VirtualAddress || !pRelocation->SizeOfBlock) {
+			return true;
+		}
+
+		if ((pRelocation->SizeOfBlock < sizeof(IMAGE_BASE_RELOCATION)) || (pRelocation->SizeOfBlock > (unRelocationEnd - unRelocationCurrent))) {
+			return false;
+		}
+
+		if (pRelocation->VirtualAddress >= unImageSize) {
+			return false;
+		}
+
+		DWORD_PTR unBase = unImageBase + pRelocation->VirtualAddress;
 		DWORD unCount = (pRelocation->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
 		PWORD pEntries = reinterpret_cast<PWORD>(pRelocation + 1);
 
@@ -1513,12 +1608,32 @@ DEFINE_CODE_IN_SECTION(".load") bool FixRelocations(PLOADER_DATA pLD) {
 			WORD unEntry = pEntries[i];
 			BYTE unType = unEntry >> 12;
 			WORD unOffset = unEntry & 0x0FFF;
-			DWORD_PTR unPatch = unBase + unOffset;
+
+			if (unType == IMAGE_REL_BASED_ABSOLUTE) {
+				continue;
+			}
+
+			SIZE_T unPatchSize = sizeof(DWORD);
+			if ((unType == IMAGE_REL_BASED_HIGH) || (unType == IMAGE_REL_BASED_LOW) || (unType == IMAGE_REL_BASED_HIGHADJ)) {
+				unPatchSize = sizeof(WORD);
+			}
+
+			if (unType == IMAGE_REL_BASED_DIR64) {
+				unPatchSize = sizeof(ULONGLONG);
+			}
+
+			if ((unType == IMAGE_REL_BASED_MACHINE_SPECIFIC_9) && (unMachine == IMAGE_FILE_MACHINE_IA64)) {
+				unPatchSize = sizeof(ULONGLONG);
+			}
+
+			const SIZE_T unPatchRva = static_cast<SIZE_T>(pRelocation->VirtualAddress) + unOffset;
+			if ((unPatchRva > unImageSize) || (unPatchSize > (unImageSize - unPatchRva))) {
+				return false;
+			}
+
+			DWORD_PTR unPatch = unImageBase + unPatchRva;
 
 			switch (unType) {
-				case IMAGE_REL_BASED_ABSOLUTE:
-					break;
-
 				case IMAGE_REL_BASED_HIGH:
 					*reinterpret_cast<WORD*>(unPatch) += HIWORD(static_cast<DWORD>(unDelta));
 					break;
@@ -1605,7 +1720,7 @@ DEFINE_CODE_IN_SECTION(".load") bool FixRelocations(PLOADER_DATA pLD) {
 			}
 		}
 
-		pRelocation = reinterpret_cast<PIMAGE_BASE_RELOCATION>((reinterpret_cast<char*>(pRelocation) + pRelocation->SizeOfBlock));
+		unRelocationCurrent += pRelocation->SizeOfBlock;
 	}
 
 	return true;
@@ -1766,7 +1881,7 @@ DEFINE_CODE_IN_SECTION(".load") bool ProtectSections(PLOADER_DATA pLD) {
 		DWORD unProtection = (unCharacteristics & IMAGE_SCN_MEM_EXECUTE) ? ((unCharacteristics & IMAGE_SCN_MEM_WRITE) ? PAGE_EXECUTE_READWRITE : PAGE_EXECUTE_READ) : (unCharacteristics & IMAGE_SCN_MEM_WRITE) ? PAGE_READWRITE
 		                                                                                                                                                                                                        : (unCharacteristics & IMAGE_SCN_MEM_READ ? PAGE_READONLY : PAGE_NOACCESS);
 		PVOID unAddress = reinterpret_cast<PVOID>((reinterpret_cast<char*>(pDH) + pFirstSection[i].VirtualAddress));
-		SIZE_T unSize = pFirstSection[i].Misc.VirtualSize ? pFirstSection[i].Misc.VirtualSize : pFirstSection[i].SizeOfRawData;
+		SIZE_T unSize = (pFirstSection[i].Misc.VirtualSize > pFirstSection[i].SizeOfRawData) ? pFirstSection[i].Misc.VirtualSize : pFirstSection[i].SizeOfRawData;
 		if (!unSize) {
 			continue;
 		}
@@ -2300,8 +2415,9 @@ DEFINE_CODE_IN_SECTION(".load") bool LinkModule(PLOADER_DATA pLD, const Detours:
 			const ULONG unIndex = (HashBaseDllName(pLD, pDTE) & 0x1F);
 			pHashHead = &pBase[unIndex];
 		}
+	}
 
-	} else {
+	if (pHashHead) {
 		InsertTailList(pHashHead, &pDTE->HashLinks);
 	}
 
@@ -2992,6 +3108,33 @@ DEFINE_CODE_IN_SECTION(".load") bool CallDllMain(PLOADER_DATA pLD, DWORD unReaso
 	return pEntryPoint(reinterpret_cast<HINSTANCE>(pDH), unReason, nullptr) == TRUE;
 }
 
+DEFINE_CODE_IN_SECTION(".load") bool CleanupLoaderImage(PLOADER_DATA pLD, bool bLdrLinked, bool bIftLinked) {
+	if (!pLD || !pLD->m_pImageAddress) {
+		return false;
+	}
+
+	bool bSuccess = true;
+	if (bIftLinked && !IFT_RemoveForImage(pLD, pLD->m_pImageAddress)) {
+		bSuccess = false;
+	}
+
+	if (bLdrLinked && !RemoveFromLDR(pLD)) {
+		bSuccess = false;
+	}
+
+	if (!bSuccess) {
+		return false;
+	}
+
+	SIZE_T unSize = 0;
+	if (!NT_SUCCESS(pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE))) {
+		return false;
+	}
+
+	pLD->m_pImageAddress = nullptr;
+	return true;
+}
+
 DEFINE_CODE_IN_SECTION(".load") DWORD WINAPI Loader(LPVOID lpParameter) {
 	SELF_INCLUDE;
 
@@ -3012,8 +3155,17 @@ DEFINE_CODE_IN_SECTION(".load") DWORD WINAPI Loader(LPVOID lpParameter) {
 #ifdef _DEBUG
 		pLD->m_pDbgPrint(STACKSTRING("LOADER: Image mapping failed").c_str());
 #endif
+		SIZE_T unZero = 0;
+		if (pLD->m_pImageAddress) {
+			pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unZero, MEM_RELEASE);
+			pLD->m_pImageAddress = nullptr;
+		}
+
 		return EXIT_FAILURE;
 	}
+
+	bool bLdrLinked = false;
+	bool bIftLinked = false;
 
 #ifdef _DEBUG
 	pLD->m_pDbgPrint(STACKSTRING("LOADER: Applying base relocations").c_str());
@@ -3023,8 +3175,7 @@ DEFINE_CODE_IN_SECTION(".load") DWORD WINAPI Loader(LPVOID lpParameter) {
 #ifdef _DEBUG
 		pLD->m_pDbgPrint(STACKSTRING("LOADER: Failed to apply base relocations").c_str());
 #endif
-		SIZE_T unSize = 0;
-		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
+		CleanupLoaderImage(pLD, bLdrLinked, bIftLinked);
 		return EXIT_FAILURE;
 	}
 
@@ -3036,8 +3187,7 @@ DEFINE_CODE_IN_SECTION(".load") DWORD WINAPI Loader(LPVOID lpParameter) {
 #ifdef _DEBUG
 		pLD->m_pDbgPrint(STACKSTRING("LOADER: Failed to resolve import table").c_str());
 #endif
-		SIZE_T unSize = 0;
-		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
+		CleanupLoaderImage(pLD, bLdrLinked, bIftLinked);
 		return EXIT_FAILURE;
 	}
 
@@ -3049,8 +3199,7 @@ DEFINE_CODE_IN_SECTION(".load") DWORD WINAPI Loader(LPVOID lpParameter) {
 #ifdef _DEBUG
 		pLD->m_pDbgPrint(STACKSTRING("LOADER: Failed to resolve delayed imports").c_str());
 #endif
-		SIZE_T unSize = 0;
-		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
+		CleanupLoaderImage(pLD, bLdrLinked, bIftLinked);
 		return EXIT_FAILURE;
 	}
 
@@ -3062,8 +3211,7 @@ DEFINE_CODE_IN_SECTION(".load") DWORD WINAPI Loader(LPVOID lpParameter) {
 #ifdef _DEBUG
 		pLD->m_pDbgPrint(STACKSTRING("LOADER: Failed to apply section protections").c_str());
 #endif
-		SIZE_T unSize = 0;
-		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
+		CleanupLoaderImage(pLD, bLdrLinked, bIftLinked);
 		return EXIT_FAILURE;
 	}
 
@@ -3077,10 +3225,11 @@ DEFINE_CODE_IN_SECTION(".load") DWORD WINAPI Loader(LPVOID lpParameter) {
 #ifdef _DEBUG
 			pLD->m_pDbgPrint(STACKSTRING("LOADER: Failed to link image into loader").c_str());
 #endif
-			SIZE_T unSize = 0;
-			pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
+			CleanupLoaderImage(pLD, bLdrLinked, bIftLinked);
 			return EXIT_FAILURE;
 		}
+
+		bLdrLinked = true;
 
 #ifdef _DEBUG
 		pLD->m_pDbgPrint(STACKSTRING("LOADER: Registering image in inverted function table").c_str());
@@ -3090,10 +3239,11 @@ DEFINE_CODE_IN_SECTION(".load") DWORD WINAPI Loader(LPVOID lpParameter) {
 #ifdef _DEBUG
 			pLD->m_pDbgPrint(STACKSTRING("LOADER: Failed to register image in inverted function table").c_str());
 #endif
-			SIZE_T unSize = 0;
-			pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
+			CleanupLoaderImage(pLD, bLdrLinked, bIftLinked);
 			return EXIT_FAILURE;
 		}
+
+		bIftLinked = true;
 	}
 
 #ifdef _DEBUG
@@ -3104,8 +3254,7 @@ DEFINE_CODE_IN_SECTION(".load") DWORD WINAPI Loader(LPVOID lpParameter) {
 #ifdef _DEBUG
 		pLD->m_pDbgPrint(STACKSTRING("LOADER: TLS callback execution failed").c_str());
 #endif
-		SIZE_T unSize = 0;
-		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
+		CleanupLoaderImage(pLD, bLdrLinked, bIftLinked);
 		return EXIT_FAILURE;
 	}
 
@@ -3120,14 +3269,7 @@ DEFINE_CODE_IN_SECTION(".load") DWORD WINAPI Loader(LPVOID lpParameter) {
 
 		CallDllMain(pLD, DLL_PROCESS_DETACH);
 		ExecuteTLS(pLD, DLL_PROCESS_DETACH);
-
-		if (pLD->m_unFlags & HIJACK_FLAGS::HIJACK_FLAG_LDR_LINKING) {
-			IFT_RemoveForImage(pLD, pLD->m_pImageAddress);
-			RemoveFromLDR(pLD);
-		}
-
-		SIZE_T unSize = 0;
-		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
+		CleanupLoaderImage(pLD, bLdrLinked, bIftLinked);
 		return EXIT_FAILURE;
 	}
 
@@ -3141,14 +3283,7 @@ DEFINE_CODE_IN_SECTION(".load") DWORD WINAPI Loader(LPVOID lpParameter) {
 		pLD->m_pDbgPrint(STACKSTRING("LOADER: Invoking DllMain (PROCESS_DETACH)").c_str());
 #endif
 
-		if (!CallDllMain(pLD, DLL_PROCESS_DETACH)) {
-#ifdef _DEBUG
-			pLD->m_pDbgPrint(STACKSTRING("LOADER: DllMain detach failed").c_str());
-#endif
-			SIZE_T unSize = 0;
-			pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
-			return EXIT_FAILURE;
-		}
+		CallDllMain(pLD, DLL_PROCESS_DETACH);
 
 #ifdef _DEBUG
 		pLD->m_pDbgPrint(STACKSTRING("LOADER: Executing TLS callbacks (PROCESS_DETACH)").c_str());
@@ -3158,42 +3293,21 @@ DEFINE_CODE_IN_SECTION(".load") DWORD WINAPI Loader(LPVOID lpParameter) {
 #ifdef _DEBUG
 			pLD->m_pDbgPrint(STACKSTRING("LOADER: TLS callback execution failed").c_str());
 #endif
-			SIZE_T unSize = 0;
-			pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
+			CleanupLoaderImage(pLD, bLdrLinked, bIftLinked);
 			return EXIT_FAILURE;
 		}
 
-		if (pLD->m_unFlags & HIJACK_FLAGS::HIJACK_FLAG_LDR_LINKING) {
+		if (!CleanupLoaderImage(pLD, bLdrLinked, bIftLinked)) {
 
 #ifdef _DEBUG
 			pLD->m_pDbgPrint(STACKSTRING("LOADER: Unregistering image from inverted function table").c_str());
 #endif
 
-			if (!IFT_RemoveForImage(pLD, pLD->m_pImageAddress)) {
 #ifdef _DEBUG
-				pLD->m_pDbgPrint(STACKSTRING("LOADER: Failed to unregister image from inverted function table").c_str());
+			pLD->m_pDbgPrint(STACKSTRING("LOADER: Failed to clean up image").c_str());
 #endif
-				SIZE_T unSize = 0;
-				pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
-				return EXIT_FAILURE;
-			}
-
-#ifdef _DEBUG
-			pLD->m_pDbgPrint(STACKSTRING("LOADER: Unlinking image from loader structures").c_str());
-#endif
-
-			if (!RemoveFromLDR(pLD)) {
-#ifdef _DEBUG
-				pLD->m_pDbgPrint(STACKSTRING("LOADER: Failed to unlink image from loader").c_str());
-#endif
-				SIZE_T unSize = 0;
-				pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
-				return EXIT_FAILURE;
-			}
+			return EXIT_FAILURE;
 		}
-
-		SIZE_T unSize = 0;
-		pLD->m_pNtFreeVirtualMemory(reinterpret_cast<HANDLE>(-1), &pLD->m_pImageAddress, &unSize, MEM_RELEASE);
 	}
 
 	return EXIT_SUCCESS;
@@ -3225,14 +3339,13 @@ void OnExitThreadEvent(DWORD unProcessID, DWORD unThreadID, DWORD unExitCode) {
 	auto iit = g_ProcessInjectionThreads.find(unProcessID);
 	if ((iit != g_ProcessInjectionThreads.end()) && (g_ProcessSuspendedMainThreads.find(unProcessID) != g_ProcessSuspendedMainThreads.end())) {
 		if (GetThreadId(iit->second) == unThreadID) {
+			RestoreAllProcessBreakPoints(unProcessID);
+			g_bDisableThreadLibraryCalls = false;
+
 			if (!unExitCode) {
 #ifdef _DEBUG
 				_tprintf_s(_T("INJECTED!\n"));
 #endif
-
-				RestoreAllProcessBreakPoints(unProcessID);
-
-				g_bDisableThreadLibraryCalls = false;
 				g_bContinueDebugging = false;
 			}
 
@@ -3273,6 +3386,82 @@ void OnLoadModuleEvent(DWORD unProcessID, DWORD unThreadID, LPVOID pImageBase) {
 	_tprintf_s(_T("MODULELOAD(0x%08X): %s\n"), reinterpret_cast<size_t>(pImageBase), ModuleFileName.second.c_str());
 #endif
 #endif // _DEBUG
+}
+
+void RemoveModuleBreakPoints(DWORD unProcessID, LPVOID pImageBase) {
+	auto tlsOwners = g_TLSCallBackOwner.find(unProcessID);
+	if (tlsOwners != g_TLSCallBackOwner.end()) {
+		auto tlsOriginal = g_TLSOriginalByte.find(unProcessID);
+		auto tlsRearm = g_TLSReArm.find(unProcessID);
+		for (auto owner = tlsOwners->second.begin(); owner != tlsOwners->second.end();) {
+			if (owner->second != pImageBase) {
+				++owner;
+				continue;
+			}
+
+			if (tlsOriginal != g_TLSOriginalByte.end()) {
+				tlsOriginal->second.erase(owner->first);
+			}
+			if (tlsRearm != g_TLSReArm.end()) {
+				for (auto rearm = tlsRearm->second.begin(); rearm != tlsRearm->second.end();) {
+					if (rearm->second == owner->first) {
+						rearm = tlsRearm->second.erase(rearm);
+					} else {
+						++rearm;
+					}
+				}
+			}
+
+			owner = tlsOwners->second.erase(owner);
+		}
+
+		if ((tlsOriginal != g_TLSOriginalByte.end()) && tlsOriginal->second.empty()) {
+			g_TLSOriginalByte.erase(tlsOriginal);
+		}
+		if ((tlsRearm != g_TLSReArm.end()) && tlsRearm->second.empty()) {
+			g_TLSReArm.erase(tlsRearm);
+		}
+		if (tlsOwners->second.empty()) {
+			g_TLSCallBackOwner.erase(tlsOwners);
+		}
+	}
+
+	auto dllOwners = g_DLLEntryPointOwner.find(unProcessID);
+	if (dllOwners != g_DLLEntryPointOwner.end()) {
+		auto dllOriginal = g_DLLEntryPointOriginalByte.find(unProcessID);
+		auto dllRearm = g_DLLEntryPointReArm.find(unProcessID);
+		for (auto owner = dllOwners->second.begin(); owner != dllOwners->second.end();) {
+			if (owner->second != pImageBase) {
+				++owner;
+				continue;
+			}
+
+			if (dllOriginal != g_DLLEntryPointOriginalByte.end()) {
+				dllOriginal->second.erase(owner->first);
+			}
+			if (dllRearm != g_DLLEntryPointReArm.end()) {
+				for (auto rearm = dllRearm->second.begin(); rearm != dllRearm->second.end();) {
+					if (rearm->second == owner->first) {
+						rearm = dllRearm->second.erase(rearm);
+					} else {
+						++rearm;
+					}
+				}
+			}
+
+			owner = dllOwners->second.erase(owner);
+		}
+
+		if ((dllOriginal != g_DLLEntryPointOriginalByte.end()) && dllOriginal->second.empty()) {
+			g_DLLEntryPointOriginalByte.erase(dllOriginal);
+		}
+		if ((dllRearm != g_DLLEntryPointReArm.end()) && dllRearm->second.empty()) {
+			g_DLLEntryPointReArm.erase(dllRearm);
+		}
+		if (dllOwners->second.empty()) {
+			g_DLLEntryPointOwner.erase(dllOwners);
+		}
+	}
 }
 
 void OnUnloadModuleEvent(DWORD unProcessID, DWORD unThreadID, LPVOID pImageBase) {
@@ -3604,6 +3793,131 @@ bool OnDLLEntryPoint(DWORD unProcessID, DWORD unThreadID, LPVOID pEntryPoint, LP
 	return bRedirected;
 }
 
+void CleanupFailedInjection(DWORD unProcessID, HANDLE hProcess, HANDLE hMainThread, LPVOID pImageAddress, LPVOID pRemoteSection, bool bMainThreadSuspended) {
+	if (bMainThreadSuspended && hMainThread) {
+		ResumeThread(hMainThread);
+	}
+
+	if (hProcess) {
+		LPVOID pSectionToFree = pRemoteSection;
+		auto sit = g_RemoteLoaderSection.find(unProcessID);
+		if (sit != g_RemoteLoaderSection.end()) {
+			pSectionToFree = sit->second.first;
+			g_RemoteLoaderSection.erase(sit);
+		}
+
+		if (pSectionToFree) {
+			VirtualFreeEx(hProcess, pSectionToFree, 0, MEM_RELEASE);
+		}
+
+		if (pImageAddress) {
+			VirtualFreeEx(hProcess, pImageAddress, 0, MEM_RELEASE);
+		}
+	}
+
+	g_ProcessSuspendedMainThreads.erase(unProcessID);
+	g_bDisableThreadLibraryCalls = false;
+}
+
+bool ValidatePEImage(const void* pImage, size_t unFileSize) {
+	if (!pImage || (unFileSize < sizeof(IMAGE_DOS_HEADER))) {
+		return false;
+	}
+
+	const auto pDH = reinterpret_cast<const IMAGE_DOS_HEADER*>(pImage);
+	if (pDH->e_magic != IMAGE_DOS_SIGNATURE || (pDH->e_lfanew < 0)) {
+		return false;
+	}
+
+	const size_t unNtOffset = static_cast<size_t>(pDH->e_lfanew);
+	const size_t unNtPrefixSize = sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER);
+	if ((unNtOffset > unFileSize) || (unNtPrefixSize > (unFileSize - unNtOffset))) {
+		return false;
+	}
+
+	const auto pFileHeader = reinterpret_cast<const IMAGE_FILE_HEADER*>(reinterpret_cast<const BYTE*>(pImage) + unNtOffset + sizeof(DWORD));
+	const size_t unOptionalHeaderSize = pFileHeader->SizeOfOptionalHeader;
+#ifdef _WIN64
+	if ((pFileHeader->Machine != IMAGE_FILE_MACHINE_AMD64) || (unOptionalHeaderSize < sizeof(IMAGE_OPTIONAL_HEADER64))) {
+		return false;
+	}
+#else
+	if ((pFileHeader->Machine != IMAGE_FILE_MACHINE_I386) || (unOptionalHeaderSize < sizeof(IMAGE_OPTIONAL_HEADER32))) {
+		return false;
+	}
+#endif
+
+	const size_t unNtHeadersSize = sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER) + unOptionalHeaderSize;
+	if ((unNtHeadersSize < unNtPrefixSize) || (unNtOffset > unFileSize) || (unNtHeadersSize > (unFileSize - unNtOffset))) {
+		return false;
+	}
+
+	const auto pNTHs = reinterpret_cast<const IMAGE_NT_HEADERS*>(reinterpret_cast<const BYTE*>(pImage) + unNtOffset);
+	if (pNTHs->Signature != IMAGE_NT_SIGNATURE) {
+		return false;
+	}
+
+	DWORD unSizeOfImage = 0;
+	DWORD unSizeOfHeaders = 0;
+	DWORD unEntryPoint = 0;
+	const IMAGE_DATA_DIRECTORY* pDataDirectory = nullptr;
+#ifdef _WIN64
+	const auto pOptionalHeader = reinterpret_cast<const IMAGE_OPTIONAL_HEADER64*>(&pNTHs->OptionalHeader);
+	if ((pOptionalHeader->Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) || (pOptionalHeader->NumberOfRvaAndSizes < IMAGE_NUMBEROF_DIRECTORY_ENTRIES)) {
+		return false;
+	}
+
+	unSizeOfImage = pOptionalHeader->SizeOfImage;
+	unSizeOfHeaders = pOptionalHeader->SizeOfHeaders;
+	unEntryPoint = pOptionalHeader->AddressOfEntryPoint;
+	pDataDirectory = pOptionalHeader->DataDirectory;
+#else
+	const auto pOptionalHeader = reinterpret_cast<const IMAGE_OPTIONAL_HEADER32*>(&pNTHs->OptionalHeader);
+	if ((pOptionalHeader->Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC) || (pOptionalHeader->NumberOfRvaAndSizes < IMAGE_NUMBEROF_DIRECTORY_ENTRIES)) {
+		return false;
+	}
+
+	unSizeOfImage = pOptionalHeader->SizeOfImage;
+	unSizeOfHeaders = pOptionalHeader->SizeOfHeaders;
+	unEntryPoint = pOptionalHeader->AddressOfEntryPoint;
+	pDataDirectory = pOptionalHeader->DataDirectory;
+#endif
+
+	if (!unSizeOfImage || !unSizeOfHeaders || (unSizeOfHeaders > unSizeOfImage) || (unSizeOfHeaders > unFileSize) || (unEntryPoint >= unSizeOfImage && unEntryPoint != 0)) {
+		return false;
+	}
+
+	const size_t unSectionTableOffset = unNtOffset + unNtHeadersSize;
+	const size_t unSectionCount = pFileHeader->NumberOfSections;
+	if (!unSectionCount || (unSectionTableOffset > unFileSize) || (unSectionCount > ((unFileSize - unSectionTableOffset) / sizeof(IMAGE_SECTION_HEADER)))) {
+		return false;
+	}
+
+	const auto pFirstSection = reinterpret_cast<const IMAGE_SECTION_HEADER*>(reinterpret_cast<const BYTE*>(pImage) + unSectionTableOffset);
+	for (size_t i = 0; i < unSectionCount; ++i) {
+		const size_t unVirtualSize = (pFirstSection[i].Misc.VirtualSize > pFirstSection[i].SizeOfRawData) ? pFirstSection[i].Misc.VirtualSize : pFirstSection[i].SizeOfRawData;
+		if ((pFirstSection[i].VirtualAddress > unSizeOfImage) || (unVirtualSize > (unSizeOfImage - pFirstSection[i].VirtualAddress))) {
+			return false;
+		}
+
+		if (pFirstSection[i].SizeOfRawData && ((pFirstSection[i].PointerToRawData > unFileSize) || (pFirstSection[i].SizeOfRawData > (unFileSize - pFirstSection[i].PointerToRawData)))) {
+			return false;
+		}
+	}
+
+	for (DWORD i = 0; i < IMAGE_NUMBEROF_DIRECTORY_ENTRIES; ++i) {
+		if (i == IMAGE_DIRECTORY_ENTRY_SECURITY || !pDataDirectory[i].Size) {
+			continue;
+		}
+
+		if (!pDataDirectory[i].VirtualAddress || (pDataDirectory[i].VirtualAddress > unSizeOfImage) || (pDataDirectory[i].Size > (unSizeOfImage - pDataDirectory[i].VirtualAddress))) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
 void OnEntryPoint(DWORD unProcessID, DWORD unThreadID) {
 #ifdef _DEBUG
 	_tprintf_s(_T("ONENTRYPOINT(%lu): %lu\n"), unProcessID, unThreadID);
@@ -3673,7 +3987,34 @@ void OnEntryPoint(DWORD unProcessID, DWORD unThreadID) {
 		return;
 	}
 
+	LARGE_INTEGER FileSize {};
+	if (!GetFileSizeEx(hFile, &FileSize)) {
+		_tprintf_s(_T("ERROR: GetFileSizeEx failed (Error = 0x%08X)\n"), GetLastError());
+		UnmapViewOfFile(pMap);
+		CloseHandle(hMapFile);
+		CloseHandle(hFile);
+		return;
+	}
+
+	if ((FileSize.QuadPart <= 0) || (static_cast<ULONGLONG>(FileSize.QuadPart) > static_cast<ULONGLONG>(SIZE_T(-1)))) {
+		_tprintf_s(_T("ERROR: Invalid file size\n"));
+		UnmapViewOfFile(pMap);
+		CloseHandle(hMapFile);
+		CloseHandle(hFile);
+		return;
+	}
+
+	const size_t unFileSize = static_cast<size_t>(FileSize.QuadPart);
 	PIMAGE_DOS_HEADER pDH = reinterpret_cast<PIMAGE_DOS_HEADER>(pMap);
+	const size_t unMinimumNtHeadersSize = sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER) + sizeof(WORD);
+	if ((unFileSize < sizeof(IMAGE_DOS_HEADER)) || (pDH->e_magic != IMAGE_DOS_SIGNATURE) || (unFileSize < unMinimumNtHeadersSize) || (pDH->e_lfanew < 0) || (static_cast<size_t>(pDH->e_lfanew) > (unFileSize - unMinimumNtHeadersSize))) {
+		_tprintf_s(_T("ERROR: Invalid PE header!\n"));
+		UnmapViewOfFile(pMap);
+		CloseHandle(hMapFile);
+		CloseHandle(hFile);
+		return;
+	}
+
 	PIMAGE_NT_HEADERS pTempNTHs = reinterpret_cast<PIMAGE_NT_HEADERS>(reinterpret_cast<char*>(pDH) + pDH->e_lfanew);
 	if (pTempNTHs->Signature != IMAGE_NT_SIGNATURE) {
 		_tprintf_s(_T("ERROR: Invalid PE header!\n"));
@@ -3686,6 +4027,14 @@ void OnEntryPoint(DWORD unProcessID, DWORD unThreadID) {
 #ifdef _WIN64
 	if (pTempNTHs->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64) {
 		_tprintf_s(_T("ERROR: This library cannot be loaded in 64 bit!\n"));
+		UnmapViewOfFile(pMap);
+		CloseHandle(hMapFile);
+		CloseHandle(hFile);
+		return;
+	}
+
+	if ((unFileSize < sizeof(IMAGE_NT_HEADERS64)) || (static_cast<size_t>(pDH->e_lfanew) > (unFileSize - sizeof(IMAGE_NT_HEADERS64)))) {
+		_tprintf_s(_T("ERROR: Invalid PE header!\n"));
 		UnmapViewOfFile(pMap);
 		CloseHandle(hMapFile);
 		CloseHandle(hFile);
@@ -3709,6 +4058,14 @@ void OnEntryPoint(DWORD unProcessID, DWORD unThreadID) {
 		return;
 	}
 
+	if ((unFileSize < sizeof(IMAGE_NT_HEADERS32)) || (static_cast<size_t>(pDH->e_lfanew) > (unFileSize - sizeof(IMAGE_NT_HEADERS32)))) {
+		_tprintf_s(_T("ERROR: Invalid PE header!\n"));
+		UnmapViewOfFile(pMap);
+		CloseHandle(hMapFile);
+		CloseHandle(hFile);
+		return;
+	}
+
 	PIMAGE_NT_HEADERS32 pNTHs = reinterpret_cast<PIMAGE_NT_HEADERS32>(pTempNTHs);
 	if (pNTHs->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC) {
 		_tprintf_s(_T("ERROR: Invalid PE header!\n"));
@@ -3719,24 +4076,13 @@ void OnEntryPoint(DWORD unProcessID, DWORD unThreadID) {
 	}
 #endif
 
-	LARGE_INTEGER FileSize {};
-	if (!GetFileSizeEx(hFile, &FileSize)) {
-		_tprintf_s(_T("ERROR: GetFileSizeEx failed (Error = 0x%08X)\n"), GetLastError());
+	if (!ValidatePEImage(pMap, unFileSize)) {
+		_tprintf_s(_T("ERROR: Invalid PE image layout!\n"));
 		UnmapViewOfFile(pMap);
 		CloseHandle(hMapFile);
 		CloseHandle(hFile);
 		return;
 	}
-
-	if (FileSize.QuadPart <= 0) {
-		_tprintf_s(_T("ERROR: Invalid file size\n"));
-		UnmapViewOfFile(pMap);
-		CloseHandle(hMapFile);
-		CloseHandle(hFile);
-		return;
-	}
-
-	const size_t unFileSize = static_cast<size_t>(FileSize.QuadPart);
 
 	LPVOID pImageAddress = VirtualAllocEx(Process, nullptr, unFileSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 	if (!pImageAddress) {
@@ -3747,7 +4093,7 @@ void OnEntryPoint(DWORD unProcessID, DWORD unThreadID) {
 	}
 
 	SIZE_T unBytesWritten = 0;
-	if (!WriteProcessMemory(Process, pImageAddress, pMap, unFileSize, &unBytesWritten)) {
+	if (!WriteProcessMemory(Process, pImageAddress, pMap, unFileSize, &unBytesWritten) || (unBytesWritten != unFileSize)) {
 		VirtualFreeEx(Process, pImageAddress, 0, MEM_RELEASE);
 		UnmapViewOfFile(pMap);
 		CloseHandle(hMapFile);
@@ -3762,7 +4108,7 @@ void OnEntryPoint(DWORD unProcessID, DWORD unThreadID) {
 	void* pSection = nullptr;
 	size_t unSectionSize = 0;
 	if (!Detours::Scan::FindSection(GetModuleHandle(nullptr), { '.', 'l', 'o', 'a', 'd', 0, 0, 0 }, &pSection, &unSectionSize)) {
-		VirtualFreeEx(Process, pImageAddress, 0, MEM_RELEASE);
+		CleanupFailedInjection(unProcessID, Process, Thread, pImageAddress, nullptr, false);
 		return;
 	}
 
@@ -3770,7 +4116,7 @@ void OnEntryPoint(DWORD unProcessID, DWORD unThreadID) {
 	LoaderData.m_pImageAddress = pImageAddress;
 
 	if (!FillLoaderData(Process, &LoaderData)) {
-		VirtualFreeEx(Process, pImageAddress, 0, MEM_RELEASE);
+		CleanupFailedInjection(unProcessID, Process, Thread, pImageAddress, nullptr, false);
 		return;
 	}
 
@@ -3792,10 +4138,14 @@ void OnEntryPoint(DWORD unProcessID, DWORD unThreadID) {
 
 	const size_t unLoaderDataOffset = reinterpret_cast<size_t>(&LoaderData) - reinterpret_cast<size_t>(pSection);
 	const size_t unLoaderOffset = reinterpret_cast<size_t>(&Loader) - reinterpret_cast<size_t>(pSection);
+	if ((unLoaderDataOffset > unSectionSize) || (sizeof(LoaderData) > (unSectionSize - unLoaderDataOffset)) || (unLoaderOffset >= unSectionSize)) {
+		CleanupFailedInjection(unProcessID, Process, Thread, pImageAddress, nullptr, false);
+		return;
+	}
 
 	void* pRemoteSection = VirtualAllocEx(Process, nullptr, unSectionSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
 	if (!pRemoteSection) {
-		VirtualFreeEx(Process, pImageAddress, 0, MEM_RELEASE);
+		CleanupFailedInjection(unProcessID, Process, Thread, pImageAddress, nullptr, false);
 		return;
 	}
 
@@ -3803,19 +4153,20 @@ void OnEntryPoint(DWORD unProcessID, DWORD unThreadID) {
 
 	SIZE_T unWritten = 0;
 	if (!WriteProcessMemory(Process, pRemoteSection, pSection, unSectionSize, &unWritten) || (unWritten != unSectionSize)) {
-		VirtualFreeEx(Process, pRemoteSection, 0, MEM_RELEASE);
-		VirtualFreeEx(Process, pImageAddress, 0, MEM_RELEASE);
+		CleanupFailedInjection(unProcessID, Process, Thread, pImageAddress, pRemoteSection, false);
 		return;
 	}
 
-	NtFlushInstructionCache(Process, nullptr, 0);
+	if (!NT_SUCCESS(NtFlushInstructionCache(Process, nullptr, 0))) {
+		CleanupFailedInjection(unProcessID, Process, Thread, pImageAddress, pRemoteSection, false);
+		return;
+	}
 
 	void* pRemoteLoaderData = reinterpret_cast<void*>(reinterpret_cast<size_t>(pRemoteSection) + unLoaderDataOffset);
 	void* pRemoteLoader = reinterpret_cast<void*>(reinterpret_cast<size_t>(pRemoteSection) + unLoaderOffset);
 
 	if (SuspendThread(Thread) != 0) {
-		VirtualFreeEx(Process, pRemoteSection, 0, MEM_RELEASE);
-		VirtualFreeEx(Process, pImageAddress, 0, MEM_RELEASE);
+		CleanupFailedInjection(unProcessID, Process, Thread, pImageAddress, pRemoteSection, false);
 		return;
 	}
 
@@ -3825,6 +4176,8 @@ void OnEntryPoint(DWORD unProcessID, DWORD unThreadID) {
 	if (hThread && (hThread != INVALID_HANDLE_VALUE)) {
 		g_bDisableThreadLibraryCalls = true;
 		g_ProcessInjectionThreads[unProcessID] = hThread;
+	} else {
+		CleanupFailedInjection(unProcessID, Process, Thread, pImageAddress, pRemoteSection, true);
 	}
 }
 
@@ -3865,17 +4218,10 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 
 					// Setting breakpoint for entrypoint
 
-					if (!ReadProcessMemory(DebugEvent.u.CreateProcessInfo.hProcess, DebugEvent.u.CreateProcessInfo.lpStartAddress, &unOriginalEntryByte, 1, nullptr)) {
+					if (!WriteByte(DebugEvent.u.CreateProcessInfo.hProcess, DebugEvent.u.CreateProcessInfo.lpStartAddress, unBreakPointByte, &unOriginalEntryByte)) {
 						*pbContinue = false;
 						break;
 					}
-
-					if (!WriteProcessMemory(DebugEvent.u.CreateProcessInfo.hProcess, DebugEvent.u.CreateProcessInfo.lpStartAddress, &unBreakPointByte, 1, nullptr)) {
-						*pbContinue = false;
-						break;
-					}
-
-					FlushInstructionCache(DebugEvent.u.CreateProcessInfo.hProcess, DebugEvent.u.CreateProcessInfo.lpStartAddress, 1);
 
 					// Other stuff
 
@@ -3997,6 +4343,7 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 
 				case UNLOAD_DLL_DEBUG_EVENT:
 					OnUnloadModuleEvent(DebugEvent.dwProcessId, DebugEvent.dwThreadId, DebugEvent.u.UnloadDll.lpBaseOfDll);
+					RemoveModuleBreakPoints(DebugEvent.dwProcessId, DebugEvent.u.UnloadDll.lpBaseOfDll);
 
 					g_Modules[DebugEvent.dwProcessId].erase(DebugEvent.u.UnloadDll.lpBaseOfDll);
 					if (g_Modules[DebugEvent.dwProcessId].empty()) {
@@ -4257,7 +4604,7 @@ bool DebugProcess(DWORD unTimeout, bool* pbContinue, bool* pbStopped) {
 					ContinueStatus = DBG_EXCEPTION_NOT_HANDLED;
 
 					if (bSeenInitialBreakPoint && (DebugEvent.u.Exception.ExceptionRecord.ExceptionCode == EXCEPTION_BREAKPOINT) && (DebugEvent.u.Exception.ExceptionRecord.ExceptionAddress == g_Processes[DebugEvent.dwProcessId].second) && (g_ProcessesOriginalEntryPointByte.find(DebugEvent.dwProcessId) != g_ProcessesOriginalEntryPointByte.end())) {
-						if (!WriteProcessMemory(g_Processes[DebugEvent.dwProcessId].first, g_Processes[DebugEvent.dwProcessId].second, &g_ProcessesOriginalEntryPointByte[DebugEvent.dwProcessId], 1, nullptr)) {
+						if (!RestoreByte(g_Processes[DebugEvent.dwProcessId].first, g_Processes[DebugEvent.dwProcessId].second, g_ProcessesOriginalEntryPointByte[DebugEvent.dwProcessId])) {
 							break;
 						}
 
@@ -4322,8 +4669,9 @@ void ShowHelp() {
 
 bool HiJackList() {
 	HKEY hKey = nullptr;
-	if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, _T("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options"), 0, KEY_READ, &hKey) != ERROR_SUCCESS) {
-		_tprintf_s(_T("ERROR: RegOpenKeyEx (Error = 0x%08X)\n"), GetLastError());
+	LSTATUS nRegistryStatus = RegOpenKeyEx(HKEY_LOCAL_MACHINE, _T("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options"), 0, KEY_READ, &hKey);
+	if (nRegistryStatus != ERROR_SUCCESS) {
+		_tprintf_s(_T("ERROR: RegOpenKeyEx (Error = 0x%08X)\n"), nRegistryStatus);
 		return false;
 	}
 
@@ -4384,35 +4732,43 @@ bool HiJackAdd(const TCHAR* szFileName, DWORD unFlags = 0) {
 	}
 
 	HKEY hKey = nullptr;
-	if (RegCreateKeyEx(HKEY_LOCAL_MACHINE, szKey, NULL, nullptr, NULL, KEY_WRITE, NULL, &hKey, NULL) != ERROR_SUCCESS) {
-		_tprintf_s(_T("ERROR: RegCreateKeyEx (Error = 0x%08X)\n"), GetLastError());
+	LSTATUS nRegistryStatus = RegCreateKeyEx(HKEY_LOCAL_MACHINE, szKey, NULL, nullptr, NULL, KEY_WRITE, NULL, &hKey, NULL);
+	if (nRegistryStatus != ERROR_SUCCESS) {
+		_tprintf_s(_T("ERROR: RegCreateKeyEx (Error = 0x%08X)\n"), nRegistryStatus);
 		return false;
 	}
 
-	PWSTR szSelfProcessPath = NtCurrentTeb()->ProcessEnvironmentBlock->ProcessParameters->ImagePathName.Buffer;
-	if (!szSelfProcessPath) {
+	PUNICODE_STRING pSelfImagePath = &NtCurrentTeb()->ProcessEnvironmentBlock->ProcessParameters->ImagePathName;
+	if (!pSelfImagePath || !pSelfImagePath->Buffer || !pSelfImagePath->Length) {
 		_tprintf_s(_T("ERROR: PEB\n"));
+		RegCloseKey(hKey);
 		return false;
 	}
 
 #ifndef _UNICODE
 	UNICODE_STRING us {};
-	RtlInitUnicodeString(&us, szSelfProcessPath);
+	RtlInitUnicodeString(&us, pSelfImagePath->Buffer);
 
 	ANSI_STRING as {};
 	NTSTATUS nStatus = RtlUnicodeStringToAnsiString(&as, &us, TRUE);
 	if (!NT_SUCCESS(nStatus)) {
 		_tprintf_s(_T("ERROR: RtlUnicodeStringToAnsiString (Error = 0x%08X)\n"), nStatus);
+		RegCloseKey(hKey);
 		return false;
 	}
 #endif // !_UNICODE
 
+	tstring SelfProcessPath;
 #ifdef _UNICODE
-	if (RegSetValueEx(hKey, _T("Debugger"), 0, REG_SZ, reinterpret_cast<const BYTE*>(szSelfProcessPath), (static_cast<DWORD>(_tcslen(szSelfProcessPath)) + 1) * sizeof(TCHAR)) != ERROR_SUCCESS) {
+	SelfProcessPath.assign(pSelfImagePath->Buffer, pSelfImagePath->Length / sizeof(WCHAR));
 #else
-	if (RegSetValueEx(hKey, _T("Debugger"), 0, REG_SZ, reinterpret_cast<const BYTE*>(as.Buffer), as.Length + 1) != ERROR_SUCCESS) {
+	SelfProcessPath.assign(as.Buffer, as.Length);
 #endif
-		_tprintf_s(_T("ERROR: RegSetValueEx (Error = 0x%08X)\n"), GetLastError());
+	tstring DebuggerPath = _T("\"") + SelfProcessPath + _T("\"");
+
+	nRegistryStatus = RegSetValueEx(hKey, _T("Debugger"), 0, REG_SZ, reinterpret_cast<const BYTE*>(DebuggerPath.c_str()), static_cast<DWORD>((DebuggerPath.size() + 1) * sizeof(TCHAR)));
+	if (nRegistryStatus != ERROR_SUCCESS) {
+		_tprintf_s(_T("ERROR: RegSetValueEx (Error = 0x%08X)\n"), nRegistryStatus);
 #ifndef _UNICODE
 		RtlFreeAnsiString(&as);
 #endif
@@ -4421,8 +4777,11 @@ bool HiJackAdd(const TCHAR* szFileName, DWORD unFlags = 0) {
 	}
 
 	DWORD unFlagsDW = unFlags;
-	if (RegSetValueEx(hKey, _T("HiJackFlags"), 0, REG_DWORD, reinterpret_cast<const BYTE*>(&unFlagsDW), sizeof(unFlagsDW)) != ERROR_SUCCESS) {
-		_tprintf_s(_T("ERROR: RegSetValueEx (Error = 0x%08X)\n"), GetLastError());
+	nRegistryStatus = RegSetValueEx(hKey, _T("HiJackFlags"), 0, REG_DWORD, reinterpret_cast<const BYTE*>(&unFlagsDW), sizeof(unFlagsDW));
+	if (nRegistryStatus != ERROR_SUCCESS) {
+		_tprintf_s(_T("ERROR: RegSetValueEx (Error = 0x%08X)\n"), nRegistryStatus);
+		RegDeleteValue(hKey, _T("Debugger"));
+		RegDeleteValue(hKey, _T("HiJackFlags"));
 #ifndef _UNICODE
 		RtlFreeAnsiString(&as);
 #endif
@@ -4449,34 +4808,41 @@ bool HiJackRemove(const TCHAR* szFileName) {
 	}
 
 	HKEY hKey = nullptr;
-	if (RegCreateKeyEx(HKEY_LOCAL_MACHINE, szKey, NULL, nullptr, NULL, KEY_WRITE, NULL, &hKey, NULL) != ERROR_SUCCESS) {
-		_tprintf_s(_T("ERROR: RegCreateKeyEx (Error = 0x%08X)\n"), GetLastError());
+	LSTATUS nRegistryStatus = RegOpenKeyEx(HKEY_LOCAL_MACHINE, szKey, 0, KEY_SET_VALUE | KEY_QUERY_VALUE, &hKey);
+	if (nRegistryStatus == ERROR_FILE_NOT_FOUND) {
+		return true;
+	}
+
+	if (nRegistryStatus != ERROR_SUCCESS) {
+		_tprintf_s(_T("ERROR: RegOpenKeyEx (Error = 0x%08X)\n"), nRegistryStatus);
 		return false;
 	}
 
-	RegDeleteValue(hKey, _T("Debugger"));
-	RegDeleteValue(hKey, _T("HiJackFlags"));
-
-	RegCloseKey(hKey);
-
-	hKey = nullptr;
-	if (RegCreateKeyEx(HKEY_LOCAL_MACHINE, szKey, NULL, nullptr, NULL, KEY_READ, NULL, &hKey, NULL) != ERROR_SUCCESS) {
-		_tprintf_s(_T("ERROR: RegCreateKeyEx (Error = 0x%08X)\n"), GetLastError());
-		return false;
+	for (LPCTSTR szValueName : { _T("Debugger"), _T("HiJackFlags") }) {
+		nRegistryStatus = RegDeleteValue(hKey, szValueName);
+		if ((nRegistryStatus != ERROR_SUCCESS) && (nRegistryStatus != ERROR_FILE_NOT_FOUND)) {
+			_tprintf_s(_T("ERROR: RegDeleteValue (Error = 0x%08X)\n"), nRegistryStatus);
+			RegCloseKey(hKey);
+			return false;
+		}
 	}
 
+	DWORD unSubKeysCount = 0;
 	DWORD unValuesCount = 0;
-	if (RegQueryInfoKey(hKey, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &unValuesCount, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) {
-		_tprintf_s(_T("ERROR: RegQueryInfoKey (Error = 0x%08X)\n"), GetLastError());
+	nRegistryStatus = RegQueryInfoKey(hKey, nullptr, nullptr, nullptr, &unSubKeysCount, nullptr, nullptr, &unValuesCount, nullptr, nullptr, nullptr, nullptr);
+	if (nRegistryStatus != ERROR_SUCCESS) {
+		_tprintf_s(_T("ERROR: RegQueryInfoKey (Error = 0x%08X)\n"), nRegistryStatus);
 		RegCloseKey(hKey);
 		return false;
 	}
 
 	RegCloseKey(hKey);
 
-	if (!unValuesCount) {
-		if (RegDeleteKey(HKEY_LOCAL_MACHINE, szKey) != ERROR_SUCCESS) {
-			_tprintf_s(_T("WARNING: RegDeleteKey (Error = 0x%08X)\n"), GetLastError());
+	if (!unValuesCount && !unSubKeysCount) {
+		nRegistryStatus = RegDeleteKey(HKEY_LOCAL_MACHINE, szKey);
+		if ((nRegistryStatus != ERROR_SUCCESS) && (nRegistryStatus != ERROR_FILE_NOT_FOUND)) {
+			_tprintf_s(_T("ERROR: RegDeleteKey (Error = 0x%08X)\n"), nRegistryStatus);
+			return false;
 		}
 	}
 
@@ -4587,6 +4953,47 @@ DWORD HiJackQueryFlags(const TCHAR* szPath) {
 	return 0;
 }
 
+tstring QuoteCommandLineArgument(const TCHAR* szArgument) {
+	if (!szArgument) {
+		return {};
+	}
+
+	bool bNeedsQuotes = (*szArgument == _T('\0'));
+	for (const TCHAR* p = szArgument; *p; ++p) {
+		if (_istspace(*p) || (*p == _T('"'))) {
+			bNeedsQuotes = true;
+			break;
+		}
+	}
+
+	if (!bNeedsQuotes) {
+		return szArgument;
+	}
+
+	tstring Result = _T("\"");
+	size_t unBackslashes = 0;
+	for (const TCHAR* p = szArgument; *p; ++p) {
+		if (*p == _T('\\')) {
+			++unBackslashes;
+			continue;
+		}
+
+		if (*p == _T('"')) {
+			Result.append(unBackslashes * 2 + 1, _T('\\'));
+			Result += _T('"');
+		} else {
+			Result.append(unBackslashes, _T('\\'));
+			Result += *p;
+		}
+
+		unBackslashes = 0;
+	}
+
+	Result.append(unBackslashes * 2, _T('\\'));
+	Result += _T('"');
+	return Result;
+}
+
 int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 #ifdef _DEBUG
 #ifdef _WIN64
@@ -4651,10 +5058,16 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 
 		DWORD unFlags = 0;
 
+		if (argc > 4) {
+			ShowHelp();
+			return EXIT_FAILURE;
+		}
+
 		if (argc == 4) {
 			TCHAR* pEnd = nullptr;
+			errno = 0;
 			const unsigned long unValue = _tcstoul(argv[3], &pEnd, 0);
-			if ((pEnd == nullptr) || (*pEnd != _T('\0'))) {
+			if ((pEnd == argv[3]) || (pEnd == nullptr) || (*pEnd != _T('\0')) || (errno == ERANGE) || (unValue > (std::numeric_limits<DWORD>::max)())) {
 				_tprintf_s(_T("ERROR: Invalid flags value: `%s`\n"), argv[3]);
 				ShowHelp();
 				return EXIT_FAILURE;
@@ -5072,14 +5485,7 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 
 	tstring CommandLine = _T("");
 	for (int i = 1; i < argc; ++i) {
-
-		if ((i == 1) || _tcschr(argv[i], _T(' '))) {
-			CommandLine += _T('"');
-			CommandLine += argv[i];
-			CommandLine += _T('"');
-		} else {
-			CommandLine += argv[i];
-		}
+		CommandLine += QuoteCommandLineArgument(argv[i]);
 
 		if ((i + 1) < argc) {
 			CommandLine += _T(' ');
@@ -5225,5 +5631,8 @@ int _tmain(int argc, PTCHAR argv[], PTCHAR envp[]) {
 		return EXIT_FAILURE;
 	}
 
+	CloseHandle(pi.hThread);
+	CloseHandle(pi.hProcess);
+	CloseHandle(hJob);
 	return static_cast<int>(unExitCode);
 }
