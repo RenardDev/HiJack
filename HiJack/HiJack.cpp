@@ -737,6 +737,7 @@ bool CreateDebugProcess(const TCHAR* szFileName, PTCHAR szCommandLine, HANDLE hJ
 		if (pi.hProcess) {
 			TerminateProcess(pi.hProcess, EXIT_FAILURE);
 		}
+
 		SafeCloseHandle(pi.hThread);
 		SafeCloseHandle(pi.hProcess);
 		return false;
