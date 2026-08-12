@@ -676,12 +676,12 @@ bool CreateProcessWithParent(const TCHAR* szFileName, PTCHAR szCommandLine, HAND
 
 	if (!CreateProcess(szFileName, szCommandLine, nullptr, nullptr, TRUE, DEBUG_ONLY_THIS_PROCESS | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, nullptr, pCurrentDirectory, &si.StartupInfo, &pi)) {
 		_tprintf_s(_T("ERROR: CreateProcess (Error = 0x%08X)\n"), GetLastError());
-		DeleteProcThreadAttributeList(si.lpAttributeList);
+		//DeleteProcThreadAttributeList(si.lpAttributeList);
 		HeapFree(GetProcessHeap(), 0, si.lpAttributeList);
 		return false;
 	}
 
-	DeleteProcThreadAttributeList(si.lpAttributeList);
+	//DeleteProcThreadAttributeList(si.lpAttributeList);
 	HeapFree(GetProcessHeap(), 0, si.lpAttributeList);
 	return true;
 }
