@@ -382,6 +382,7 @@ bool EnableDebugPrivilege(HANDLE hProcess, bool bEnable) {
 	tp.Privileges[0].Attributes = bEnable ? SE_PRIVILEGE_ENABLED : 0;
 
 	SetLastError(ERROR_SUCCESS);
+
 	if (!AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(tp), nullptr, nullptr)) {
 		_tprintf_s(_T("ERROR: AdjustTokenPrivileges (Error = 0x%08X)\n"), GetLastError());
 		CloseHandle(hToken);
@@ -1206,18 +1207,18 @@ void RestoreAllProcessBreakPoints(DWORD unProcessID) {
 
 	auto itTLSOriginalByte = g_TLSOriginalByte.find(unProcessID);
 	if (itTLSOriginalByte != g_TLSOriginalByte.end()) {
-		for (const auto& rec : itTLSOriginalByte->second) {
-			if (!rec.first) {
+		for (const auto& record : itTLSOriginalByte->second) {
+			if (!record.first) {
 				continue;
 			}
 
 			MEMORY_BASIC_INFORMATION mbi {};
-			if (VirtualQueryEx(Process, rec.first, &mbi, sizeof(mbi))) {
+			if (VirtualQueryEx(Process, record.first, &mbi, sizeof(mbi))) {
 				DWORD unOldProtection = 0;
 				if (VirtualProtectEx(Process, mbi.BaseAddress, 1, PAGE_EXECUTE_READWRITE, &unOldProtection)) {
 					SIZE_T unWritten = 0;
-					WriteProcessMemory(Process, rec.first, &rec.second, 1, &unWritten);
-					FlushInstructionCache(Process, rec.first, 1);
+					WriteProcessMemory(Process, record.first, &record.second, 1, &unWritten);
+					FlushInstructionCache(Process, record.first, 1);
 					DWORD unDummy = 0;
 					VirtualProtectEx(Process, mbi.BaseAddress, 1, unOldProtection, &unDummy);
 				}
@@ -1237,18 +1238,18 @@ void RestoreAllProcessBreakPoints(DWORD unProcessID) {
 
 	auto itDLLOriginalByte = g_DLLEntryPointOriginalByte.find(unProcessID);
 	if (itDLLOriginalByte != g_DLLEntryPointOriginalByte.end()) {
-		for (const auto& rec : itDLLOriginalByte->second) {
-			if (!rec.first) {
+		for (const auto& record : itDLLOriginalByte->second) {
+			if (!record.first) {
 				continue;
 			}
 
 			MEMORY_BASIC_INFORMATION mbi {};
-			if (VirtualQueryEx(Process, rec.first, &mbi, sizeof(mbi))) {
+			if (VirtualQueryEx(Process, record.first, &mbi, sizeof(mbi))) {
 				DWORD unOldProtection = 0;
 				if (VirtualProtectEx(Process, mbi.BaseAddress, 1, PAGE_EXECUTE_READWRITE, &unOldProtection)) {
 					SIZE_T unWritten = 0;
-					WriteProcessMemory(Process, rec.first, &rec.second, 1, &unWritten);
-					FlushInstructionCache(Process, rec.first, 1);
+					WriteProcessMemory(Process, record.first, &record.second, 1, &unWritten);
+					FlushInstructionCache(Process, record.first, 1);
 					DWORD unDummy = 0;
 					VirtualProtectEx(Process, mbi.BaseAddress, 1, unOldProtection, &unDummy);
 				}
@@ -3403,6 +3404,7 @@ void RemoveModuleBreakPoints(DWORD unProcessID, LPVOID pImageBase) {
 			if (tlsOriginal != g_TLSOriginalByte.end()) {
 				tlsOriginal->second.erase(owner->first);
 			}
+
 			if (tlsRearm != g_TLSReArm.end()) {
 				for (auto rearm = tlsRearm->second.begin(); rearm != tlsRearm->second.end();) {
 					if (rearm->second == owner->first) {
@@ -3419,9 +3421,11 @@ void RemoveModuleBreakPoints(DWORD unProcessID, LPVOID pImageBase) {
 		if ((tlsOriginal != g_TLSOriginalByte.end()) && tlsOriginal->second.empty()) {
 			g_TLSOriginalByte.erase(tlsOriginal);
 		}
+
 		if ((tlsRearm != g_TLSReArm.end()) && tlsRearm->second.empty()) {
 			g_TLSReArm.erase(tlsRearm);
 		}
+
 		if (tlsOwners->second.empty()) {
 			g_TLSCallBackOwner.erase(tlsOwners);
 		}
@@ -3440,6 +3444,7 @@ void RemoveModuleBreakPoints(DWORD unProcessID, LPVOID pImageBase) {
 			if (dllOriginal != g_DLLEntryPointOriginalByte.end()) {
 				dllOriginal->second.erase(owner->first);
 			}
+
 			if (dllRearm != g_DLLEntryPointReArm.end()) {
 				for (auto rearm = dllRearm->second.begin(); rearm != dllRearm->second.end();) {
 					if (rearm->second == owner->first) {
@@ -3456,9 +3461,11 @@ void RemoveModuleBreakPoints(DWORD unProcessID, LPVOID pImageBase) {
 		if ((dllOriginal != g_DLLEntryPointOriginalByte.end()) && dllOriginal->second.empty()) {
 			g_DLLEntryPointOriginalByte.erase(dllOriginal);
 		}
+
 		if ((dllRearm != g_DLLEntryPointReArm.end()) && dllRearm->second.empty()) {
 			g_DLLEntryPointReArm.erase(dllRearm);
 		}
+
 		if (dllOwners->second.empty()) {
 			g_DLLEntryPointOwner.erase(dllOwners);
 		}
@@ -3907,7 +3914,7 @@ bool ValidatePEImage(const void* pImage, size_t unFileSize) {
 	}
 
 	for (DWORD i = 0; i < IMAGE_NUMBEROF_DIRECTORY_ENTRIES; ++i) {
-		if (i == IMAGE_DIRECTORY_ENTRY_SECURITY || !pDataDirectory[i].Size) {
+		if ((i == IMAGE_DIRECTORY_ENTRY_SECURITY) || !pDataDirectory[i].Size) {
 			continue;
 		}
 
