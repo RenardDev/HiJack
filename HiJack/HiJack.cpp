@@ -1761,8 +1761,8 @@ DEFINE_CODE_IN_SECTION(".load") bool ResolveImports(PLOADER_DATA pLD) {
 		pLD->m_pRtlFreeUnicodeString(&us);
 
 		PIMAGE_THUNK_DATA pThunk = (pIID->OriginalFirstThunk != 0)
-		                               ? reinterpret_cast<PIMAGE_THUNK_DATA>((reinterpret_cast<char*>(pDH) + pIID->OriginalFirstThunk))
-		                               : reinterpret_cast<PIMAGE_THUNK_DATA>((reinterpret_cast<char*>(pDH) + pIID->FirstThunk));
+									   ? reinterpret_cast<PIMAGE_THUNK_DATA>((reinterpret_cast<char*>(pDH) + pIID->OriginalFirstThunk))
+									   : reinterpret_cast<PIMAGE_THUNK_DATA>((reinterpret_cast<char*>(pDH) + pIID->FirstThunk));
 		PIMAGE_THUNK_DATA pIAT = reinterpret_cast<PIMAGE_THUNK_DATA>((reinterpret_cast<char*>(pDH) + pIID->FirstThunk));
 
 		while (pThunk->u1.AddressOfData) {
@@ -1881,7 +1881,7 @@ DEFINE_CODE_IN_SECTION(".load") bool ProtectSections(PLOADER_DATA pLD) {
 	for (WORD i = 0; i < pNTHs->FileHeader.NumberOfSections; ++i) {
 		DWORD unCharacteristics = pFirstSection[i].Characteristics;
 		DWORD unProtection = (unCharacteristics & IMAGE_SCN_MEM_EXECUTE) ? ((unCharacteristics & IMAGE_SCN_MEM_WRITE) ? PAGE_EXECUTE_READWRITE : PAGE_EXECUTE_READ) : (unCharacteristics & IMAGE_SCN_MEM_WRITE) ? PAGE_READWRITE
-		                                                                                                                                                                                                        : (unCharacteristics & IMAGE_SCN_MEM_READ ? PAGE_READONLY : PAGE_NOACCESS);
+																																																				: (unCharacteristics & IMAGE_SCN_MEM_READ ? PAGE_READONLY : PAGE_NOACCESS);
 		PVOID unAddress = reinterpret_cast<PVOID>((reinterpret_cast<char*>(pDH) + pFirstSection[i].VirtualAddress));
 		SIZE_T unSize = (pFirstSection[i].Misc.VirtualSize > pFirstSection[i].SizeOfRawData) ? pFirstSection[i].Misc.VirtualSize : pFirstSection[i].SizeOfRawData;
 		if (!unSize) {
@@ -2819,11 +2819,11 @@ DEFINE_CODE_IN_SECTION(".load") bool IFT_OpenView(PLOADER_DATA pLD, IFT_VIEW& v)
 }
 
 DEFINE_CODE_IN_SECTION(".load") bool IFT_QueryImageInfo(
-    PVOID pImageBase, ULONG& unSizeOfImage,
+	PVOID pImageBase, ULONG& unSizeOfImage,
 #ifdef _WIN64
-    ULONG& unSizeOfTable, ULONG_PTR& unExceptionDirectory
+	ULONG& unSizeOfTable, ULONG_PTR& unExceptionDirectory
 #elif _WIN32
-    ULONG& unExceptionDirectory, ULONG& unExceptionDirectorySize
+	ULONG& unExceptionDirectory, ULONG& unExceptionDirectorySize
 #endif
 ) {
 	if (!pImageBase) {
